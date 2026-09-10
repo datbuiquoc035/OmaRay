@@ -211,7 +211,8 @@ Item {
   readonly property int listPadding: Style.space(10)
   readonly property int rowInset: gutter - listPadding
 
-  readonly property int cardRadius: Style.space(12)
+  // Square card, no rounding on the block itself.
+  readonly property int cardRadius: 0
   readonly property int rowRadius: Style.space(8)
   readonly property int searchHeight: Style.space(56)
   readonly property int rowHeight: Style.space(40)
