@@ -10,7 +10,8 @@
   "kinds": [
     "overlay",
     "menu",
-    "bar-widget"
+    "bar-widget",
+    "productivity"
   ],
   "keepLoaded": true,
   "entryPoints": {
