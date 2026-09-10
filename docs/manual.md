@@ -5,7 +5,8 @@ obvious thing. On an empty query the front page shows the stock categories
 (Apps, Learn, Trigger, Style, Setup, Install, Remove, Update, About,
 System) above your most-used apps; a category primes its query (or runs,
 for the self-contained leaves), Apps expands the full app list, and any
-keystroke leaves for full search.
+keystroke leaves for full search. The System view shows Commands, Hotkeys
+and web search only — no applications.
 
 ## What it answers
 

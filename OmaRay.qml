@@ -160,6 +160,10 @@ Item {
   readonly property int maxExpandedAppRows: 60
   // True while the Apps category is expanded; cleared on every open.
   property bool appsExpanded: false
+  // A primed query that hides app results (the System category view).
+  // Compared by value, so typing the same query by hand shows the same
+  // view; any other query, or none, restores apps.
+  property string primedNoAppsQuery: ""
   // The helper returns at most 40 hits; the list shows the first 10 of them.
   readonly property int maxFileRows: 10
   readonly property int maxClipboardRows: 8
@@ -230,6 +234,7 @@ Item {
     var initial = ""
     var routeArgv = null
     var routeApps = false
+    var routeNoApps = false
     try {
       var rawPayload = String(payloadJson || "{}")
       if (rawPayload.length > root.maxPayloadChars) rawPayload = "{}"
@@ -244,12 +249,16 @@ Item {
       var route = payload ? (payload.initialMenu || payload.menu || "") : ""
       var resolved = Routes.resolve(route)
       if (resolved && resolved.kind === "exec" && resolved.argv) routeArgv = resolved.argv
-      else if (resolved && resolved.kind === "query" && !initial) initial = resolved.query
+      else if (resolved && resolved.kind === "query" && !initial) {
+        initial = resolved.query
+        if (resolved.noApps) routeNoApps = true
+      }
       else if (resolved && resolved.kind === "apps") routeApps = true
     } catch (e) {
       initial = ""
       routeArgv = null
       routeApps = false
+      routeNoApps = false
     }
 
     // Leaves run without the panel ever opening — the summon that named
@@ -264,6 +273,7 @@ Item {
     // The Apps category: the full frecency app list instead of the
     // categories front page. Reset on every open.
     root.appsExpanded = routeApps
+    root.primedNoAppsQuery = routeNoApps ? initial : ""
     root.opened = true
     root.armedKey = ""
     root.rows = []
@@ -722,6 +732,9 @@ Item {
   }
 
   function appRows(q) {
+    // The System category view (and any query primed with noApps) shows
+    // Commands, Hotkeys and web search only — never applications.
+    if (q && root.primedNoAppsQuery !== "" && q === root.primedNoAppsQuery) return []
     var entries = root.appEntries(q)
     var now = Date.now()
     var candidates = []
@@ -940,7 +953,7 @@ Item {
       { key: "cat.remove", title: "Remove", subtitle: "Remove software", icon: "󰩹", argv: ["xdg-terminal-exec", "--app-id=org.omarchy.terminal", "omarchy-pkg-remove"] },
       { key: "cat.update", title: "Update", subtitle: "Omarchy and packages", icon: "󰚰", argv: ["omarchy", "launch", "tui", "omarchy-update"] },
       { key: "cat.about", title: "About", subtitle: "This system", icon: "󰋼", argv: ["omarchy", "launch", "about"] },
-      { key: "cat.system", title: "System", subtitle: "Lock, log out, restart, shut down", icon: "󰐥", query: "system" }
+      { key: "cat.system", title: "System", subtitle: "Lock, log out, restart, shut down", icon: "󰐥", query: "system", noApps: true }
     ]
     var out = []
     for (var i = 0; i < defs.length; i++) {
@@ -967,7 +980,7 @@ Item {
           title: d.title, subtitle: d.subtitle,
           accessory: "Category", icon: d.icon,
           primaryLabel: "Browse",
-          payload: { query: d.query }
+          payload: { query: d.query, noApps: d.noApps === true }
         }))
       }
     }
@@ -1477,6 +1490,7 @@ Item {
     case "prime":
       // A category tap becomes the query it names; the rebuild that follows
       // is the drill-in. The cursor lands at the end, ready to narrow.
+      root.primedNoAppsQuery = r.payload.noApps === true ? String(r.payload.query || "") : ""
       input.text = String(r.payload.query || "")
       input.cursorPosition = input.text.length
       break
