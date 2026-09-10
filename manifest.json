@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "datbuiquoc035.omaray",
+  "name": "OmaRay",
+  "version": "0.1.0-dev",
+  "author": "Arseniy Zarechnev",
+  "license": "MIT",
+  "description": "Raycast-style command palette: apps, windows, calculator, unit conversion, reminders, calendar events, file search and web search (Spotlight-based rebase)",
+  "homepage": "https://github.com/datbuiquoc035/OmaRay",
+  "kinds": [
+    "overlay",
+    "menu"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "OmaRay.qml",
+    "menu": "OmaRay.qml"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.menu"
+  }
+}

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# omaray — install / uninstall / validate / test the OmaRay plugin.
+#
+# The plugin id is permanent; installing removes the previous directory
+# first so stale files from an older tree can never linger beside the new
+# one. Restart the shell after installing: the plugin is keepLoaded, so new
+# QML only takes effect on a fresh load.
+set -euo pipefail
+
+PLUGIN_ID="datbuiquoc035.omaray"
+PLUGIN_DIR="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+die() { echo "omaray: $*" >&2; exit 1; }
+
+cmd_validate() {
+  command -v omarchy >/dev/null && omarchy plugin validate "$ROOT"
+  python3 -m py_compile "$ROOT/bin/omaray-helper"
+  for file in "$ROOT"/lib/*.js; do node --check "$file"; done
+  if command -v qmlformat >/dev/null; then
+    qmlformat -n "$ROOT/OmaRay.qml" >/dev/null
+  elif [ -x /usr/lib/qt6/bin/qmlformat ]; then
+    /usr/lib/qt6/bin/qmlformat -n "$ROOT/OmaRay.qml" >/dev/null
+  fi
+  echo "validate: ok"
+}
+
+cmd_test() {
+  node --test "$ROOT"/tests/*.test.js
+  (cd "$ROOT" && python3 -m unittest discover -s tests -p "*_test.py")
+}
+
+cmd_install() {
+  local enable=""
+  [ "${1-}" = "--enable" ] && enable=1
+  rm -rf "$PLUGIN_DIR"
+  mkdir -p "$PLUGIN_DIR"
+  cp "$ROOT/manifest.json" "$ROOT/OmaRay.qml" "$ROOT/omaray.example.json" \
+    "$ROOT/README.md" "$ROOT/LICENSE" "$PLUGIN_DIR/"
+  cp -r "$ROOT/lib" "$ROOT/bin" "$ROOT/tests" "$ROOT/docs" "$PLUGIN_DIR/"
+  chmod +x "$PLUGIN_DIR/bin/omaray-helper" "$PLUGIN_DIR/bin/omaray"
+  if [ -n "$enable" ]; then
+    omarchy plugin enable "$PLUGIN_ID"
+  fi
+  echo "installed to $PLUGIN_DIR"
+  echo "restart the shell to load it: omarchy restart shell"
+}
+
+cmd_uninstall() {
+  if command -v omarchy >/dev/null; then
+    omarchy plugin disable "$PLUGIN_ID" || true
+  fi
+  rm -rf "$PLUGIN_DIR"
+  if [ "${1-}" = "--purge" ]; then
+    rm -f "$HOME/.config/omarchy/omaray.json"
+    rm -rf "$HOME/.local/state/omaray"
+  fi
+  echo "uninstalled $PLUGIN_ID (disabling restores the stock menu)"
+}
+
+case "${1-}" in
+  validate) cmd_validate ;;
+  test) cmd_test ;;
+  install) shift; cmd_install "${1-}" ;;
+  uninstall) shift; cmd_uninstall "${1-}" ;;
+  *) die "usage: omaray {validate|test|install [--enable]|uninstall [--purge]}" ;;
+esac

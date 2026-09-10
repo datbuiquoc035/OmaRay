@@ -1,0 +1,955 @@
+#!/usr/bin/env python3
+"""Bounded I/O broker for the OmaRay overlay.
+
+OmaRay is a `keepLoaded` plugin: it lives inside the long-running
+omarchy-shell process. Anything that process reads stays resident, so no read
+may be open-ended. Every file read, every subprocess and every write that
+OmaRay needs goes through this helper instead of happening in QML, and each
+one is bounded three ways before the shell ever sees a byte:
+
+  * a hard ceiling on how much is read,
+  * a wall-clock deadline with a TERM -> KILL process-group teardown,
+  * a normalised, count-limited projection as the only thing printed.
+
+Every subcommand prints exactly one JSON object on stdout and exits 0. Failure
+is `{"ok": false, "error": ...}` — the caller falls back to its defaults, so a
+hostile or broken input degrades the feature instead of the shell.
+
+Directories are opened as verified descriptors (owned by us, not group- or
+world-writable) and every step of a path is opened relative to the previous
+descriptor, so no ancestor can be swapped between the check and the use.
+Directory components may be symlinks — `~/.config` pointing into a dotfiles
+repo is a normal setup — but the descriptor they resolve to still has to pass
+the ownership check. File components are opened O_NOFOLLOW and must be regular
+files owned by us, which is what keeps a planted symlink, FIFO or device out.
+"""
+
+import errno
+import fcntl
+import json
+import os
+import re
+import select
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+EUID = os.geteuid()
+ACTIVE_PROC = None
+
+# ------------------------------------------------------------------ limits
+SETTINGS_BYTES = 64 * 1024
+USAGE_BYTES = 256 * 1024
+CLIPBOARD_BYTES = 8 * 1024 * 1024
+ICS_BYTES = 64 * 1024
+
+USAGE_KEEP = 400
+USAGE_KEY_LEN = 256
+USAGE_KEY_RE = re.compile(r"^(?:app:|cmd:|bang\.|win:|emoji:|hotkey:)[^\x00-\x1f]{1,240}$")
+
+CLIP_ENTRIES = 200
+CLIP_TITLE_CHARS = 120
+CLIP_TEXT_BYTES = 1024 * 1024
+
+SUGGEST_BYTES = 64 * 1024
+SUGGEST_DEADLINE = 3.0
+SUGGEST_COUNT = 8
+SUGGEST_CHARS = 200
+SUGGEST_QUERY_CHARS = 200
+
+FILES_BYTES = 256 * 1024
+FILES_DEADLINE = 3.0
+FILES_COUNT = 40
+FILES_PATH_CHARS = 1024
+FILES_PATTERN_CHARS = 256
+
+REMINDER_BYTES = 256 * 1024
+REMINDER_DEADLINE = 3.0
+REMINDER_COUNT = 50
+REMINDER_FIELD_CHARS = 200
+
+EMOJI_BYTES = 256 * 1024
+EMOJI_COUNT = 4000
+EMOJI_FIELD_CHARS = 200
+
+HOTKEYS_BYTES = 256 * 1024
+HOTKEYS_DEADLINE = 5.0
+HOTKEYS_SCRIPT = "bin/omarchy-menu-keybindings"
+
+DMENU_PATH_CHARS = 1024
+DMENU_SELECTION_BYTES = 8192
+
+ICS_STAMP_RE = re.compile(r"^[0-9TZ]{1,32}$")
+
+# The packaged list of desktop ids Omarchy keeps out of its own launcher.
+# It lives under /usr/share, so it is the one read that is not ours: root
+# owns it, and root is the only other owner any read here will accept.
+OMARCHY_FALLBACK_PATH = "/usr/share/omarchy"
+HIDES_PARTS = ("default", "omarchy")
+HIDES_NAME = "launcher.hides"
+HIDES_BYTES = 64 * 1024
+HIDES_COUNT = 400
+HIDES_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+SYSTEM_OWNERS = (0, EUID)
+
+
+class Denied(Exception):
+    """Any boundary violation. Always fails closed."""
+
+
+# ------------------------------------------------------------ descriptors
+def _verify_dir(fd, label, owners=(EUID,)):
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode):
+        raise Denied("%s is not a directory" % label)
+    if st.st_uid not in owners:
+        raise Denied("%s is not owned by an accepted user" % label)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise Denied("%s is group- or world-writable" % label)
+
+
+def home_fd():
+    home = os.environ.get("HOME", "")
+    if not home.startswith("/"):
+        raise Denied("HOME is not an absolute path")
+    fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        _verify_dir(fd, "HOME")
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def dir_at(parent, name, create=False):
+    """Open `name` under `parent` as a verified directory descriptor."""
+    if create:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+        except OSError as exc:
+            raise Denied("cannot create %s: %s" % (name, exc.strerror))
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=parent)
+    try:
+        _verify_dir(fd, name)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def walk(parts, create=False):
+    """Resolve a chain of directory names below $HOME, one descriptor at a time."""
+    fd = home_fd()
+    for part in parts:
+        nxt = dir_at(fd, part, create=create)
+        os.close(fd)
+        fd = nxt
+    return fd
+
+
+def system_dir(path):
+    """Open an absolute system directory, verifying every component in turn.
+
+    Same walk as walk(), one descriptor per component so no ancestor can be
+    swapped between the check and the use, with root allowed as an owner
+    alongside us. Nothing outside Omarchy's own install prefix is read this
+    way, and nothing read this way is ever written.
+    """
+    if not path.startswith("/"):
+        raise Denied("system path is not absolute")
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        _verify_dir(fd, "/", SYSTEM_OWNERS)
+        for part in [p for p in path.split("/") if p]:
+            if part == "..":
+                raise Denied("system path escapes upward")
+            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+            _verify_dir(fd, part, SYSTEM_OWNERS)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_file(dirfd, name, cap, owners=(EUID,)):
+    """Read at most `cap` bytes from a regular file we own, never following a symlink."""
+    try:
+        # O_NONBLOCK so a FIFO planted at this name cannot block the open
+        # itself; the S_ISREG check below then rejects it outright.
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                     dir_fd=dirfd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise Denied("%s is a symlink" % name)
+        raise Denied("cannot open %s: %s" % (name, exc.strerror))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Denied("%s is not a regular file" % name)
+        if st.st_uid not in owners:
+            raise Denied("%s is not owned by an accepted user" % name)
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            raise Denied("%s is group- or world-writable" % name)
+        if st.st_size > cap:
+            raise Denied("%s is larger than %d bytes" % (name, cap))
+        os.set_blocking(fd, True)
+        chunks = []
+        total = 0
+        while total <= cap:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            chunks.append(chunk)
+        if total > cap:
+            raise Denied("%s grew past %d bytes while reading" % (name, cap))
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def read_json(dirfd, name, cap, fallback):
+    raw = read_file(dirfd, name, cap)
+    if raw is None:
+        return fallback
+    try:
+        return json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return fallback
+
+
+def lock_at(dirfd, name):
+    """An exclusive advisory lock on a regular file we own. Never truncates."""
+    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600, dir_fd=dirfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != EUID:
+            raise Denied("%s is not a regular file owned by this user" % name)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def write_atomic(dirfd, name, payload):
+    """Publish `payload` at `name` by renaming a private 0600 temp, dir-fd-relatively."""
+    tmp = ".%s.tmp.%d" % (name, os.getpid())
+    try:
+        os.unlink(tmp, dir_fd=dirfd)
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o600, dir_fd=dirfd)
+    try:
+        view = memoryview(payload)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.replace(tmp, name, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+    except Exception:
+        try:
+            os.unlink(tmp, dir_fd=dirfd)
+        except OSError:
+            pass
+        raise
+    os.fsync(dirfd)
+
+
+# ------------------------------------------------------------ subprocesses
+def run_bounded(argv, cap, deadline, stdin_bytes=None):
+    """Run `argv`, returning at most `cap` bytes of stdout within `deadline`.
+
+    The child gets its own session, so the deadline tears down the whole
+    process group rather than just the leader — `fd` spawning threads or curl
+    hanging on a socket cannot outlive the call. Reaching either bound is not
+    an error: the caller works with the bounded prefix.
+    """
+    global ACTIVE_PROC
+    blocked = {signal.SIGINT, signal.SIGTERM}
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked)
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        ACTIVE_PROC = proc
+    except OSError as exc:
+        raise Denied("cannot run %s: %s" % (argv[0], exc.strerror))
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+    out = proc.stdout
+    try:
+        if stdin_bytes is not None:
+            try:
+                proc.stdin.write(stdin_bytes)
+            except OSError:
+                pass
+            try:
+                proc.stdin.close()
+            except OSError:
+                pass
+
+        fd = out.fileno()
+        os.set_blocking(fd, False)
+        end = time.monotonic() + deadline
+        chunks = []
+        total = 0
+        truncated = False
+
+        while True:
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                truncated = True
+                break
+            ready, _, _ = select.select([fd], [], [], min(remaining, 0.25))
+            if not ready:
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            room = cap - total
+            if len(chunk) >= room:
+                chunks.append(chunk[:room])
+                truncated = True
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks), truncated
+    finally:
+        _reap(proc)
+        if ACTIVE_PROC is proc:
+            ACTIVE_PROC = None
+        try:
+            out.close()
+        except OSError:
+            pass
+
+
+def _reap(proc):
+    """TERM the whole process group, then KILL it, then wait. Never leaves a child."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        pass
+
+    # Always address the group once more: its leader may have exited while a
+    # descendant remains alive with the same process-group id.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        if proc.poll() is None:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _handle_termination(signum, _frame):
+    proc = ACTIVE_PROC
+    if proc is not None:
+        _reap(proc)
+    raise SystemExit(128 + signum)
+
+
+# --------------------------------------------------------------- clamping
+def clamp_text(value, chars):
+    s = "" if value is None else str(value)
+    s = "".join(ch for ch in s if ch == "\t" or ch >= " " or ch == "\n")
+    return s[:chars]
+
+
+def clamp_int(value, low, high, default):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, n))
+
+
+def clamp_bool(value, default):
+    return bool(value) if isinstance(value, bool) else default
+
+
+def read_stdin(cap):
+    data = sys.stdin.buffer.read(cap + 1)
+    if len(data) > cap:
+        raise Denied("stdin exceeded %d bytes" % cap)
+    return data
+
+
+def emit(payload):
+    payload["ok"] = True
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    sys.stdout.write("\n")
+
+
+# ------------------------------------------------------------- normalizers
+def normalize_settings(parsed):
+    out = {
+        "webSuggestions": False,
+        "searchEngine": "g",
+        "fileSearch": True,
+        "maxApps": 8,
+        "maxSuggestions": 4,
+    }
+    if not isinstance(parsed, dict):
+        return out
+    out["webSuggestions"] = clamp_bool(parsed.get("webSuggestions"), False)
+    out["fileSearch"] = clamp_bool(parsed.get("fileSearch"), True)
+    out["maxApps"] = clamp_int(parsed.get("maxApps"), 3, 24, 8)
+    out["maxSuggestions"] = clamp_int(parsed.get("maxSuggestions"), 0, SUGGEST_COUNT, 4)
+    engine = parsed.get("searchEngine")
+    if isinstance(engine, str) and re.match(r"^[A-Za-z]{1,8}$", engine):
+        out["searchEngine"] = engine.lower()
+    return out
+
+
+def normalize_usage(parsed):
+    """Keep only well-formed entries under keys OmaRay itself mints.
+
+    The prefix test is what stops a hand-edited store introducing keys with
+    special meaning in a JS object — `__proto__` never matches it — and the
+    count cap is applied before anything is emitted, not after.
+    """
+    if not isinstance(parsed, dict):
+        return {}
+    now = int(time.time() * 1000)
+    kept = []
+    for key, value in parsed.items():
+        if not isinstance(key, str) or len(key) > USAGE_KEY_LEN:
+            continue
+        if not USAGE_KEY_RE.match(key):
+            continue
+        if not isinstance(value, dict):
+            continue
+        count = clamp_int(value.get("count"), 0, 1000000, 0)
+        last = clamp_int(value.get("last"), 0, now + 86400000, 0)
+        if count <= 0:
+            continue
+        kept.append((key, count, last))
+        if len(kept) >= USAGE_KEEP * 4:
+            break
+    kept.sort(key=lambda e: e[2], reverse=True)
+    return {k: {"count": c, "last": l} for k, c, l in kept[:USAGE_KEEP]}
+
+
+# ---------------------------------------------------------------- commands
+def cmd_read_settings():
+    fd = walk([".config", "omarchy"])
+    try:
+        parsed = read_json(fd, "omaray.json", SETTINGS_BYTES, {})
+    finally:
+        os.close(fd)
+    emit({"settings": normalize_settings(parsed)})
+
+
+def cmd_write_settings():
+    raw = read_stdin(SETTINGS_BYTES)
+    try:
+        parsed = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+    except ValueError:
+        raise Denied("settings payload is not JSON")
+    settings = normalize_settings(parsed)
+    payload = json.dumps(settings, separators=(",", ":")).encode("utf-8")
+
+    fd = walk([".config", "omarchy"])
+    try:
+        lock = lock_at(fd, ".settings.lock")
+        try:
+            write_atomic(fd, "omaray.json", payload)
+        finally:
+            os.close(lock)
+    finally:
+        os.close(fd)
+    emit({"settings": settings})
+
+
+def cmd_read_hides():
+    """The desktop ids Omarchy keeps out of its own launcher.
+
+    Omarchy's AppLibrary filters these before it hands a list to the menu.
+    When the shell withholds that library, OmaRay builds the list itself
+    and has to apply the same filter, or it shows a page of entries the menu
+    has always hidden.
+    """
+    base = os.environ.get("OMARCHY_PATH", "").strip() or OMARCHY_FALLBACK_PATH
+    fd = system_dir(base.rstrip("/") + "/" + "/".join(HIDES_PARTS))
+    try:
+        raw = read_file(fd, HIDES_NAME, HIDES_BYTES, SYSTEM_OWNERS)
+    finally:
+        os.close(fd)
+
+    hides = []
+    for line in (raw or b"").decode("utf-8", "replace").splitlines():
+        value = line.strip()
+        if value.endswith(".desktop"):
+            value = value[:-8]
+        if HIDES_ID_RE.match(value):
+            hides.append(value)
+        if len(hides) >= HIDES_COUNT:
+            break
+    emit({"hides": hides})
+
+
+def normalize_emojis(parsed):
+    """Keep only well-formed {e, k} entries from the first-party emoji data."""
+    if not isinstance(parsed, list):
+        return []
+    out = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        glyph = entry.get("e")
+        keywords = entry.get("k")
+        if not isinstance(glyph, str) or not isinstance(keywords, str):
+            continue
+        glyph = glyph.strip()
+        keywords = " ".join(keywords.split())
+        if not glyph or not keywords:
+            continue
+        if len(glyph) > EMOJI_FIELD_CHARS or len(keywords) > EMOJI_FIELD_CHARS:
+            continue
+        out.append({"e": glyph, "k": keywords})
+        if len(out) >= EMOJI_COUNT:
+            break
+    return out
+
+
+def cmd_read_emojis():
+    """Omarchy's own emoji catalogue, bounded and validated.
+
+    The file is packaged with Omarchy, so like the hides list it is root
+    owned — the one read that is not ours. The QML side searches it locally
+    and copies the chosen glyph straight to the clipboard.
+    """
+    base = os.environ.get("OMARCHY_PATH", "").strip() or OMARCHY_FALLBACK_PATH
+    fd = system_dir(base.rstrip("/") + "/shell/plugins/emojis")
+    try:
+        raw = read_file(fd, "emojis.json", EMOJI_BYTES, SYSTEM_OWNERS)
+    finally:
+        os.close(fd)
+    if raw is None:
+        emit({"emojis": []})
+        return
+    try:
+        parsed = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        parsed = []
+    emit({"emojis": normalize_emojis(parsed)})
+
+
+def omarchy_script(name):
+    """Resolve a helper script under Omarchy's prefix, root-owned or refused.
+
+    OMARCHY_PATH is the shell's own environment, the same source the QML
+    side reads it from — but a sourced script executes, so unlike a data
+    read the file itself has to be a root-owned regular file, not merely
+    inside a verified directory.
+    """
+    base = os.environ.get("OMARCHY_PATH", "").strip() or OMARCHY_FALLBACK_PATH
+    path = base.rstrip("/") + "/" + name
+    try:
+        st = os.stat(path)
+    except OSError as exc:
+        raise Denied("cannot stat %s: %s" % (name, exc.strerror))
+    if not stat.S_ISREG(st.st_mode):
+        raise Denied("%s is not a regular file" % name)
+    if st.st_uid != 0:
+        raise Denied("%s is not root-owned" % name)
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise Denied("%s is group- or world-writable" % name)
+    return path
+
+
+def cmd_hotkeys():
+    """The binding records behind the Super+K menu, via its own script.
+
+    Sourcing with --print defines the script's functions without running the
+    menu; output_binding_records then prints the cached records the menu
+    itself selects from. The QML side parses them into rows and dispatches
+    picks back through the same script.
+    """
+    script = omarchy_script(HOTKEYS_SCRIPT)
+    output, _ = run_bounded(
+        ["bash", "-lc", "source \"$0\" --print >/dev/null && output_binding_records", script],
+        HOTKEYS_BYTES, HOTKEYS_DEADLINE)
+    emit({"records": output.decode("utf-8", "replace")})
+
+
+def _dmenu_file(path, what):
+    """Open a caller rendez-vous file: absolute, bounded, never a symlink.
+
+    The select/input scripts hand us mktemp files in /tmp, so unlike every
+    other write here there is no owned directory to resolve against. What
+    there is instead: O_NOFOLLOW on open (a planted symlink fails closed),
+    plus fstat insisting on a regular file owned by this user. Created 0600
+    when missing — the done file is always removed before we are summoned.
+    """
+    if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
+        raise Denied("%s path is not absolute" % what)
+    if len(path) > DMENU_PATH_CHARS:
+        raise Denied("%s path is too long" % what)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise Denied("%s is a symlink" % what)
+        raise Denied("cannot open %s: %s" % (what, exc.strerror))
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Denied("%s is not a regular file" % what)
+        if st.st_uid != EUID:
+            raise Denied("%s is not owned by this user" % what)
+        os.ftruncate(fd, 0)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def cmd_dmenu_finish(argv):
+    """Complete a select/input request: stdin becomes the selection.
+
+    argv is [selectionFile, doneFile]. An empty stdin is a cancellation —
+    the selection file stays empty either way and the done file always
+    appears, which is what releases the caller's poll loop. Both files are
+    reported back so a caller that reused paths can tell a stale done file
+    (from a previous request) apart from this one by mtime if it cares.
+    """
+    if len(argv) != 2:
+        raise Denied("dmenu-finish takes a selection file and a done file")
+    selection = read_stdin(DMENU_SELECTION_BYTES).decode("utf-8", "replace")
+    if "\x00" in selection:
+        raise Denied("selection contains NUL")
+    sel_fd = _dmenu_file(argv[0], "selection file")
+    try:
+        if selection:
+            view = memoryview(selection.encode("utf-8"))
+            while view:
+                view = view[os.write(sel_fd, view):]
+            tail = memoryview(b"\n")
+            while tail:
+                tail = tail[os.write(sel_fd, tail):]
+            os.fsync(sel_fd)
+    finally:
+        os.close(sel_fd)
+    done_fd = _dmenu_file(argv[1], "done file")
+    os.close(done_fd)
+    emit({"wrote": bool(selection)})
+
+
+def cmd_read_usage():
+    fd = walk([".local", "state", "omaray"], create=True)
+    try:
+        parsed = read_json(fd, "usage.json", USAGE_BYTES, {})
+    finally:
+        os.close(fd)
+    emit({"usage": normalize_usage(parsed)})
+
+
+def cmd_write_usage():
+    raw = read_stdin(USAGE_BYTES)
+    try:
+        parsed = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+    except ValueError:
+        raise Denied("usage payload is not JSON")
+    usage = normalize_usage(parsed)
+    payload = json.dumps(usage, separators=(",", ":")).encode("utf-8")
+
+    fd = walk([".local", "state", "omaray"], create=True)
+    try:
+        lock = lock_at(fd, ".usage.lock")
+        try:
+            write_atomic(fd, "usage.json", payload)
+        finally:
+            os.close(lock)
+    finally:
+        os.close(fd)
+    emit({"written": len(usage)})
+
+
+def _clipboard_entries():
+    fd = walk([".local", "state", "omaray"], create=True)
+    try:
+        parsed = read_json(fd, "clipboard-history.json", CLIPBOARD_BYTES, [])
+    finally:
+        os.close(fd)
+    if not isinstance(parsed, list):
+        return []
+    out = []
+    for item in parsed:
+        if len(out) >= CLIP_ENTRIES:
+            break
+        if not isinstance(item, dict) or item.get("type") != "text":
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        out.append(text)
+    return out
+
+
+def cmd_read_clipboard():
+    """Titles only.
+
+    The full clipboard text is deliberately left on disk: a history holding
+    tokens and passwords has no business being resident in a shell process
+    that outlives the query. `clipboard-copy` re-reads the one entry the user
+    picked and pipes it straight to wl-copy, so it never crosses this boundary.
+    """
+    entries = _clipboard_entries()
+    rows = []
+    for index, text in enumerate(entries):
+        flat = re.sub(r"\s+", " ", text).strip()
+        if not flat:
+            continue
+        title = flat[:CLIP_TITLE_CHARS] + ("…" if len(flat) > CLIP_TITLE_CHARS else "")
+        rows.append({"index": index, "title": title, "bytes": len(text.encode("utf-8"))})
+    emit({"items": rows})
+
+
+def cmd_clipboard_copy(argv):
+    if len(argv) != 2:
+        raise Denied("clipboard-copy takes an index and a title")
+    index = clamp_int(argv[0], 0, CLIP_ENTRIES - 1, -1)
+    if index < 0:
+        raise Denied("bad clipboard index")
+    entries = _clipboard_entries()
+    if index >= len(entries):
+        raise Denied("clipboard entry is gone")
+    text = entries[index]
+    # The history may have shifted between listing and activation, so the row
+    # the user actually saw is re-identified by its title before anything is
+    # put on the clipboard.
+    flat = re.sub(r"\s+", " ", text).strip()
+    expected = flat[:CLIP_TITLE_CHARS] + ("…" if len(flat) > CLIP_TITLE_CHARS else "")
+    if expected != argv[1]:
+        raise Denied("clipboard entry changed")
+    payload = text.encode("utf-8")[:CLIP_TEXT_BYTES]
+    # Not run_bounded: wl-copy forks a daemon that has to outlive this call in
+    # order to serve the selection, and tearing down the process group would
+    # take that daemon with it. A plain bounded wait on the parent is right
+    # here — the input is a fixed size and the argv has no operands at all.
+    try:
+        subprocess.run(["wl-copy"], input=payload, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Denied("wl-copy failed: %s" % type(exc).__name__)
+    emit({"copied": len(payload)})
+
+
+def cmd_reminders():
+    raw, _ = run_bounded(["omarchy-reminder", "show", "--json"],
+                         REMINDER_BYTES, REMINDER_DEADLINE)
+    try:
+        parsed = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+    except ValueError:
+        parsed = {}
+    items = parsed.get("reminders") if isinstance(parsed, dict) else None
+    rows = []
+    if isinstance(items, list):
+        for item in items[:REMINDER_COUNT]:
+            if not isinstance(item, dict):
+                continue
+            rows.append({
+                "label": clamp_text(item.get("label"), REMINDER_FIELD_CHARS),
+                "remaining": clamp_text(item.get("remaining"), REMINDER_FIELD_CHARS),
+                "atTime": clamp_text(item.get("atTime"), REMINDER_FIELD_CHARS),
+            })
+    emit({"reminders": rows})
+
+
+def cmd_suggest(argv):
+    if len(argv) != 1:
+        raise Denied("suggest takes one query")
+    query = clamp_text(argv[0], SUGGEST_QUERY_CHARS).strip()
+    if not query:
+        emit({"suggestions": []})
+        return
+    # The endpoint is built here rather than passed in, so nothing upstream can
+    # steer the request at a different host.
+    from urllib.parse import quote
+    url = ("https://suggestqueries.google.com/complete/search"
+           "?client=firefox&hl=en&q=" + quote(query, safe=""))
+    raw, truncated = run_bounded(
+        ["curl", "-sf", "--proto", "=https", "--max-time", "2", "--connect-timeout", "2",
+         "--max-filesize", str(SUGGEST_BYTES), "--compressed", "--", url],
+        SUGGEST_BYTES, SUGGEST_DEADLINE)
+    if truncated:
+        emit({"suggestions": []})
+        return
+    try:
+        parsed = json.loads(raw.decode("utf-8", "replace")) if raw else []
+    except ValueError:
+        parsed = []
+    items = parsed[1] if isinstance(parsed, list) and len(parsed) > 1 else []
+    out = []
+    if isinstance(items, list):
+        for item in items[:SUGGEST_COUNT * 4]:
+            if len(out) >= SUGGEST_COUNT:
+                break
+            if not isinstance(item, str):
+                continue
+            s = clamp_text(item, SUGGEST_CHARS).strip()
+            if s:
+                out.append(s)
+    emit({"suggestions": out})
+
+
+def cmd_files(argv):
+    if len(argv) != 2:
+        raise Denied("files takes a directory and a pattern")
+    directory = argv[0]
+    pattern = clamp_text(argv[1], FILES_PATTERN_CHARS)
+    if not directory.startswith("/") or len(directory) > FILES_PATH_CHARS or not pattern:
+        raise Denied("bad file search target")
+    try:
+        probe = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        emit({"files": []})
+        return
+    os.close(probe)
+
+    raw, _ = run_bounded(
+        ["fd", "--hidden", "--follow", "--one-file-system",
+         "--exclude", ".git", "--exclude", "node_modules", "--exclude", ".cache",
+         "--max-results", str(FILES_COUNT),
+         "--", pattern, directory],
+        FILES_BYTES, FILES_DEADLINE)
+
+    rows = []
+    for line in raw.decode("utf-8", "replace").split("\n"):
+        if len(rows) >= FILES_COUNT:
+            break
+        if not line or len(line) > FILES_PATH_CHARS:
+            continue
+        is_dir = line.endswith("/")
+        path = line[:-1] if is_dir else line
+        if not path:
+            continue
+        slash = path.rfind("/")
+        rows.append({
+            "path": path,
+            "name": path[slash + 1:] if slash >= 0 else path,
+            "dir": path[:slash] if slash > 0 else "/",
+            "isDir": is_dir,
+        })
+    emit({"files": rows})
+
+
+def cmd_write_ics(argv):
+    if len(argv) != 1 or not ICS_STAMP_RE.match(argv[0]):
+        raise Denied("bad event stamp")
+    body = read_stdin(ICS_BYTES)
+    if not body:
+        raise Denied("empty event")
+
+    downloads = os.environ.get("XDG_DOWNLOAD_DIR", "")
+    home = os.environ.get("HOME", "")
+    name = "Downloads"
+    if downloads.startswith(home + "/") and "/" not in downloads[len(home) + 1:]:
+        name = downloads[len(home) + 1:]
+    fd = walk([name], create=True)
+    try:
+        # O_EXCL is the whole symlink defence: a name that already exists —
+        # including one that exists only as a dangling symlink — is never
+        # opened, it is stepped over.
+        for attempt in range(20):
+            suffix = "" if attempt == 0 else "-%d" % attempt
+            filename = "omarchy-event-%s%s.ics" % (argv[0], suffix)
+            try:
+                out = os.open(filename,
+                              os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                              0o600, dir_fd=fd)
+            except FileExistsError:
+                continue
+            try:
+                view = memoryview(body)
+                while view:
+                    view = view[os.write(out, view):]
+                os.fsync(out)
+            finally:
+                os.close(out)
+            emit({"path": os.path.join(home, name, filename)})
+            return
+        raise Denied("could not find a free filename")
+    finally:
+        os.close(fd)
+
+
+# name -> (handler, whether it reads positional arguments)
+COMMANDS = {
+    "read-settings": (cmd_read_settings, False),
+    "write-settings": (cmd_write_settings, False),
+    "read-usage": (cmd_read_usage, False),
+    "read-hides": (cmd_read_hides, False),
+    "read-emojis": (cmd_read_emojis, False),
+    "hotkeys": (cmd_hotkeys, False),
+    "dmenu-finish": (cmd_dmenu_finish, True),
+    "write-usage": (cmd_write_usage, False),
+    "read-clipboard": (cmd_read_clipboard, False),
+    "clipboard-copy": (cmd_clipboard_copy, True),
+    "reminders": (cmd_reminders, False),
+    "suggest": (cmd_suggest, True),
+    "files": (cmd_files, True),
+    "write-ics": (cmd_write_ics, True),
+}
+
+
+def main(argv):
+    signal.signal(signal.SIGINT, _handle_termination)
+    signal.signal(signal.SIGTERM, _handle_termination)
+    if not argv or argv[0] not in COMMANDS:
+        sys.stdout.write(json.dumps({"ok": False, "error": "unknown command"}) + "\n")
+        return 0
+    handler, takes_args = COMMANDS[argv[0]]
+    try:
+        handler(argv[1:]) if takes_args else handler()
+    except Denied as exc:
+        sys.stdout.write(json.dumps({"ok": False, "error": str(exc)}) + "\n")
+    except Exception as exc:  # never let a traceback become the payload
+        sys.stdout.write(json.dumps({"ok": False, "error": type(exc).__name__}) + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
