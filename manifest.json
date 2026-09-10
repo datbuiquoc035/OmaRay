@@ -20,7 +20,7 @@
   },
   "barWidget": {
     "displayName": "OmaRay",
-    "description": "Opens the OmaRay command palette",
+    "description": "Opens the OmaRay main menu",
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "left"
