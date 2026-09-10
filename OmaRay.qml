@@ -156,6 +156,10 @@ Item {
   // Idle shows categories above a short frecency-app block; typing
   // anything switches to full search.
   readonly property int maxIdleAppRows: 8
+  // The Apps category shows the full list instead.
+  readonly property int maxExpandedAppRows: 60
+  // True while the Apps category is expanded; cleared on every open.
+  property bool appsExpanded: false
   // The helper returns at most 40 hits; the list shows the first 10 of them.
   readonly property int maxFileRows: 10
   readonly property int maxClipboardRows: 8
@@ -182,12 +186,10 @@ Item {
   // Hyprland's, applied to this layer's namespace.
   readonly property color foreground: Color.menu.text
   readonly property color accent: Color.accent
-  // Frosted glass needs something left to frost: at 0.86 the card is opaque
-  // and Hyprland's blur has no visible effect. 0.20 is nearly all glass:
-  // only usable with the compositor blur on (see README), otherwise text
-  // floats on the bare wallpaper.
-  readonly property color glassBackground: Util.alpha(Color.menu.background, 0.20)
-  readonly property color glassBorder: Util.alpha(Color.foreground, 0.16)
+  // Solid card, no compositor blur needed: fully opaque menu background
+  // with a theme-accent border doing the framing instead of frost.
+  readonly property color glassBackground: Color.menu.background
+  readonly property color glassBorder: Util.alpha(Color.accent, 0.5)
   readonly property color glassSheen: Util.alpha("#ffffff", 0.07)
   readonly property color scrim: Util.alpha(Color.menu.scrim, 0.25)
   readonly property color selectedBackground: Util.alpha(Color.foreground, 0.12)
@@ -227,6 +229,7 @@ Item {
   function open(payloadJson) {
     var initial = ""
     var routeArgv = null
+    var routeApps = false
     try {
       var rawPayload = String(payloadJson || "{}")
       if (rawPayload.length > root.maxPayloadChars) rawPayload = "{}"
@@ -242,9 +245,11 @@ Item {
       var resolved = Routes.resolve(route)
       if (resolved && resolved.kind === "exec" && resolved.argv) routeArgv = resolved.argv
       else if (resolved && resolved.kind === "query" && !initial) initial = resolved.query
+      else if (resolved && resolved.kind === "apps") routeApps = true
     } catch (e) {
       initial = ""
       routeArgv = null
+      routeApps = false
     }
 
     // Leaves run without the panel ever opening — the summon that named
@@ -256,6 +261,9 @@ Item {
     }
 
     root.dmenuMode = ""
+    // The Apps category: the full frecency app list instead of the
+    // categories front page. Reset on every open.
+    root.appsExpanded = routeApps
     root.opened = true
     root.armedKey = ""
     root.rows = []
@@ -738,7 +746,8 @@ Item {
       return a.order - b.order
     })
 
-    var limit = q ? Util.clamp(root.settings.maxApps, 3, root.maxAppRows) : root.maxIdleAppRows
+    var limit = q ? Util.clamp(root.settings.maxApps, 3, root.maxAppRows)
+      : (root.appsExpanded ? root.maxExpandedAppRows : root.maxIdleAppRows)
     var out = []
     for (var j = 0; j < candidates.length && out.length < limit; j++) {
       var c = candidates[j]
@@ -904,19 +913,34 @@ Item {
     return out
   }
 
-  // Idle front page, shaped like the stock menu root: each row primes the
-  // query (or runs, for the two leaves) instead of drilling into a submenu
-  // tree, which this palette deliberately does not have. The frecency-app
-  // block below it is the old idle view, kept short.
+  // Idle front page, named exactly like the stock menu root. Each row primes
+  // its query (or runs, for the self-contained leaves) instead of drilling
+  // into a submenu tree, which this palette deliberately does not have —
+  // mixed/interactive submenus (Trigger's tools, Setup's editors, Install's
+  // pickers) have no single flat answer, so they prime the closest query
+  // and the rest stays a keystroke away in search. The Apps row expands the
+  // full frecency app list in place; Esc closes as usual.
   function categoryRows() {
+    if (root.appsExpanded) {
+      return [root.row({
+        key: "cat.back", section: "Categories", kind: "back",
+        title: "Back", subtitle: "Return to categories",
+        accessory: "Category", icon: "",
+        primaryLabel: "Back",
+        payload: {}
+      })]
+    }
     var defs = [
-      { key: "cat.screenshot", title: "Screenshots & Recording", subtitle: "Capture, record, scan", icon: "󰩭", query: "screenshot" },
-      { key: "cat.theme", title: "Appearance", subtitle: "Theme, wallpaper, font", icon: "󰸌", query: "theme" },
-      { key: "cat.system", title: "System & Power", subtitle: "Lock, log out, restart, shut down", icon: "󰐥", query: "system" },
-      { key: "cat.update", title: "Update System", subtitle: "Omarchy and packages", icon: "󰚰", argv: ["omarchy", "launch", "tui", "omarchy-update"] },
-      { key: "cat.about", title: "About This System", subtitle: "fastfetch system info", icon: "󰋼", argv: ["omarchy", "launch", "about"] },
-      { key: "cat.docs", title: "Docs & Manuals", subtitle: "Omarchy, Hyprland, Arch wikis", icon: "󰖟", query: "docs" },
-      { key: "cat.settings", title: "Settings", subtitle: "Tune the palette", icon: "", query: "settings" }
+      { key: "cat.apps", title: "Apps", subtitle: "Your applications", icon: "󰀻", expand: true },
+      { key: "cat.learn", title: "Learn", subtitle: "Docs and wikis", icon: "󰖟", query: "docs" },
+      { key: "cat.trigger", title: "Trigger", subtitle: "Capture, record, tools", icon: "󰩭", query: "screenshot" },
+      { key: "cat.style", title: "Style", subtitle: "Theme, wallpaper, font", icon: "󰸌", query: "theme" },
+      { key: "cat.setup", title: "Setup", subtitle: "Configure the system", icon: "󰒓", query: "config" },
+      { key: "cat.install", title: "Install", subtitle: "Add software", icon: "󰉋", argv: ["xdg-terminal-exec", "--app-id=org.omarchy.terminal", "omarchy-pkg-install"] },
+      { key: "cat.remove", title: "Remove", subtitle: "Remove software", icon: "󰩹", argv: ["xdg-terminal-exec", "--app-id=org.omarchy.terminal", "omarchy-pkg-remove"] },
+      { key: "cat.update", title: "Update", subtitle: "Omarchy and packages", icon: "󰚰", argv: ["omarchy", "launch", "tui", "omarchy-update"] },
+      { key: "cat.about", title: "About", subtitle: "This system", icon: "󰋼", argv: ["omarchy", "launch", "about"] },
+      { key: "cat.system", title: "System", subtitle: "Lock, log out, restart, shut down", icon: "󰐥", query: "system" }
     ]
     var out = []
     for (var i = 0; i < defs.length; i++) {
@@ -926,8 +950,16 @@ Item {
           key: d.key, section: "Categories", kind: "shell",
           title: d.title, subtitle: d.subtitle,
           accessory: "Category", icon: d.icon,
-          primaryLabel: d.key === "cat.update" || d.key === "cat.about" ? "Open" : "Run",
+          primaryLabel: "Open",
           payload: { argv: d.argv }
+        }))
+      } else if (d.expand) {
+        out.push(root.row({
+          key: d.key, section: "Categories", kind: "expand",
+          title: d.title, subtitle: d.subtitle,
+          accessory: "Category", icon: d.icon,
+          primaryLabel: "Browse",
+          payload: {}
         }))
       } else {
         out.push(root.row({
@@ -1447,6 +1479,16 @@ Item {
       // is the drill-in. The cursor lands at the end, ready to narrow.
       input.text = String(r.payload.query || "")
       input.cursorPosition = input.text.length
+      break
+
+    case "expand":
+      root.appsExpanded = true
+      root.rebuild()
+      break
+
+    case "back":
+      root.appsExpanded = false
+      root.rebuild()
       break
     }
   }

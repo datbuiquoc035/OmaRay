@@ -3,9 +3,17 @@ const test = require("node:test")
 const Routes = require("../lib/Routes.js")
 
 test("root aliases open the palette", () => {
-  for (const r of ["", "root", "menu", "go", "ROOT", "  ", "unknown-route", "setup.default.agent", "share", "hardware", "system", "apps"]) {
+  for (const r of ["", "root", "menu", "go", "ROOT", "  ", "unknown-route", "setup.default.agent", "share", "hardware"]) {
     assert.equal(Routes.resolve(r).kind, "open", r)
   }
+})
+
+test("system opens the System category primed", () => {
+  assert.deepEqual(Routes.resolve("system"), { kind: "query", query: "system" })
+})
+
+test("apps opens the Apps category expanded", () => {
+  assert.deepEqual(Routes.resolve("apps"), { kind: "apps" })
 })
 
 test("underscores and case are normalized", () => {

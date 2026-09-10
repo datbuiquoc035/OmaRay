@@ -1,9 +1,11 @@
 # OmaRay manual
 
 Providers run in order; the top row is preselected, so Enter does the
-obvious thing. On an empty query the front page shows categories (each one
-primes its query when picked) above your most-used apps; any keystroke
-leaves it for full search.
+obvious thing. On an empty query the front page shows the stock categories
+(Apps, Learn, Trigger, Style, Setup, Install, Remove, Update, About,
+System) above your most-used apps; a category primes its query (or runs,
+for the self-contained leaves), Apps expands the full app list, and any
+keystroke leaves for full search.
 
 ## What it answers
 

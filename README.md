@@ -30,15 +30,11 @@ Extra keybind (optional) in `~/.config/hypr/bindings.lua`:
 o.bind("CTRL + SPACE", "OmaRay", "omarchy-shell shell toggle datbuiquoc035.omaray '{}'")
 ```
 
-Frosted glass (optional) in `~/.config/hypr/looknfeel.lua` (needs global blur on —
-required at the current 0.20 card alpha, otherwise text floats on bare wallpaper):
+The card is solid (fully opaque) with a theme-accent border — no compositor
+blur needed. For a frosted look instead, lower `glassBackground` alpha in
+`OmaRay.qml` and add, with global blur on:
 
 ```lua
-hl.config({
-  decoration = {
-    blur = { enabled = true, size = 8, passes = 3 },
-  },
-})
 hl.layer_rule({
   match = { namespace = "omarchy-omaray" },
   blur = true,
@@ -66,7 +62,9 @@ search and the pickers.
 
 | Route | Does |
 |---|---|
-| `root`, `menu`, `go`, `apps`, `system`, … | Opens the palette |
+| `root`, `menu`, `go`, … | Opens the palette (categories front page) |
+| `apps` | Opens the Apps category (Super+Alt+Space) |
+| `system` | Opens the System category, primed (Super+Esc) |
 | `capture` | Opens primed with `screenshot` |
 | `toggle` | Opens primed with `toggle` |
 | `reminder-set` | Opens primed with `remind me ` |
