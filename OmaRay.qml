@@ -932,17 +932,10 @@ Item {
   // mixed/interactive submenus (Trigger's tools, Setup's editors, Install's
   // pickers) have no single flat answer, so they prime the closest query
   // and the rest stays a keystroke away in search. The Apps row expands the
-  // full frecency app list in place; Esc closes as usual.
+  // full frecency app list in place; Esc closes as usual, and Left arrow
+  // steps back to categories while the query is empty.
   function categoryRows() {
-    if (root.appsExpanded) {
-      return [root.row({
-        key: "cat.back", section: "Categories", kind: "back",
-        title: "Back", subtitle: "Return to categories",
-        accessory: "Category", icon: "",
-        primaryLabel: "Back",
-        payload: {}
-      })]
-    }
+    if (root.appsExpanded) return []
     var defs = [
       { key: "cat.apps", title: "Apps", subtitle: "Your applications", icon: "󰀻", expand: true },
       { key: "cat.learn", title: "Learn", subtitle: "Docs and wikis", icon: "󰖟", query: "docs" },
@@ -1497,11 +1490,6 @@ Item {
 
     case "expand":
       root.appsExpanded = true
-      root.rebuild()
-      break
-
-    case "back":
-      root.appsExpanded = false
       root.rebuild()
       break
     }
@@ -2074,6 +2062,14 @@ Item {
               // a shell completes a path — handy for narrowing an app search.
               var sel = root.selectedRow()
               if (sel && sel.kind === "app") input.text = sel.title
+              event.accepted = true
+            } else if (event.key === Qt.Key_Left
+                && root.appsExpanded && input.text.length === 0) {
+              // The Apps category has no Back row: Left steps back to the
+              // categories front page. With text present Left keeps its
+              // normal caret job.
+              root.appsExpanded = false
+              root.rebuild()
               event.accepted = true
             }
           }
