@@ -50,7 +50,7 @@ namespace.
 | `⇧↵` / `Ctrl+↵` | Secondary action (calendar → `.ics`, setting → previous value) |
 | `Tab` | Complete the query with the selected app's name |
 | `←` | Back to categories: from the Apps list on an empty query, or out of a just-primed category query (edited text keeps caret duty) |
-| `Esc` | Clear the query; on an empty query, close (and cancel any picker request) |
+| `Esc` | Close from a fresh category prime or an empty query; otherwise clear the query first (and cancel any picker request) |
 
 Log out, restart and shut down ask for a second `↵` before they act.
 

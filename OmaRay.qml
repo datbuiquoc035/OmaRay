@@ -2045,7 +2045,11 @@ Item {
           Keys.onPressed: function(event) {
             typingGuard.restart()
             if (event.key === Qt.Key_Escape) {
-              if (input.text.length > 0) input.text = ""
+              // A pristine category prime exits outright — Left is the way
+              // back to categories. Anything typed stays two-step.
+              if (input.text.length > 0
+                  && (root.primedQuery === "" || input.text !== root.primedQuery))
+                input.text = ""
               else root.dismiss()
               event.accepted = true
             } else if (event.key === Qt.Key_Down
