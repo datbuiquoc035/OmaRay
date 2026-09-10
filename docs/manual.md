@@ -1,7 +1,9 @@
 # OmaRay manual
 
 Providers run in order; the top row is preselected, so Enter does the
-obvious thing.
+obvious thing. On an empty query the front page shows categories (each one
+primes its query when picked) above your most-used apps; any keystroke
+leaves it for full search.
 
 ## What it answers
 

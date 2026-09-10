@@ -153,7 +153,9 @@ Item {
   // are built rather than after. maxApps is a user setting, so it is clamped
   // rather than trusted; the rest bound lists that arrive from outside.
   readonly property int maxAppRows: 24
-  readonly property int maxIdleAppRows: 60
+  // Idle shows categories above a short frecency-app block; typing
+  // anything switches to full search.
+  readonly property int maxIdleAppRows: 8
   // The helper returns at most 40 hits; the list shows the first 10 of them.
   readonly property int maxFileRows: 10
   readonly property int maxClipboardRows: 8
@@ -181,9 +183,10 @@ Item {
   readonly property color foreground: Color.menu.text
   readonly property color accent: Color.accent
   // Frosted glass needs something left to frost: at 0.86 the card is opaque
-  // and Hyprland's blur has no visible effect. 0.62 keeps text contrast while
-  // letting the blurred wallpaper through as colour and shape.
-  readonly property color glassBackground: Util.alpha(Color.menu.background, 0.62)
+  // and Hyprland's blur has no visible effect. 0.20 is nearly all glass:
+  // only usable with the compositor blur on (see README), otherwise text
+  // floats on the bare wallpaper.
+  readonly property color glassBackground: Util.alpha(Color.menu.background, 0.20)
   readonly property color glassBorder: Util.alpha(Color.foreground, 0.16)
   readonly property color glassSheen: Util.alpha("#ffffff", 0.07)
   readonly property color scrim: Util.alpha(Color.menu.scrim, 0.25)
@@ -901,6 +904,44 @@ Item {
     return out
   }
 
+  // Idle front page, shaped like the stock menu root: each row primes the
+  // query (or runs, for the two leaves) instead of drilling into a submenu
+  // tree, which this palette deliberately does not have. The frecency-app
+  // block below it is the old idle view, kept short.
+  function categoryRows() {
+    var defs = [
+      { key: "cat.screenshot", title: "Screenshots & Recording", subtitle: "Capture, record, scan", icon: "󰩭", query: "screenshot" },
+      { key: "cat.theme", title: "Appearance", subtitle: "Theme, wallpaper, font", icon: "󰸌", query: "theme" },
+      { key: "cat.system", title: "System & Power", subtitle: "Lock, log out, restart, shut down", icon: "󰐥", query: "system" },
+      { key: "cat.update", title: "Update System", subtitle: "Omarchy and packages", icon: "󰚰", argv: ["omarchy", "launch", "tui", "omarchy-update"] },
+      { key: "cat.about", title: "About This System", subtitle: "fastfetch system info", icon: "󰋼", argv: ["omarchy", "launch", "about"] },
+      { key: "cat.docs", title: "Docs & Manuals", subtitle: "Omarchy, Hyprland, Arch wikis", icon: "󰖟", query: "docs" },
+      { key: "cat.settings", title: "Settings", subtitle: "Tune the palette", icon: "", query: "settings" }
+    ]
+    var out = []
+    for (var i = 0; i < defs.length; i++) {
+      var d = defs[i]
+      if (d.argv) {
+        out.push(root.row({
+          key: d.key, section: "Categories", kind: "shell",
+          title: d.title, subtitle: d.subtitle,
+          accessory: "Category", icon: d.icon,
+          primaryLabel: d.key === "cat.update" || d.key === "cat.about" ? "Open" : "Run",
+          payload: { argv: d.argv }
+        }))
+      } else {
+        out.push(root.row({
+          key: d.key, section: "Categories", kind: "prime",
+          title: d.title, subtitle: d.subtitle,
+          accessory: "Category", icon: d.icon,
+          primaryLabel: "Browse",
+          payload: { query: d.query }
+        }))
+      }
+    }
+    return out
+  }
+
   function clipboardQuery(q) {
     var m = String(q || "").match(/^(?:cb|clip|clipboard)\s+(\S.*)$/i)
     return m ? m[1].trim() : ""
@@ -1152,6 +1193,16 @@ Item {
     var next = []
     function push(list) { for (var i = 0; i < list.length; i++) next.push(list[i]) }
 
+    // Idle is the stock-menu-shaped front page: categories first, most-used
+    // apps below. Any keystroke leaves it for full search.
+    if (!q) {
+      push(root.categoryRows())
+      push(root.appRows(q))
+      root.rows = next
+      root.finishRebuild(next)
+      return
+    }
+
     push(root.intentRows(q))
     push(root.colorRows(q))
     push(root.settingsRows(q))
@@ -1167,6 +1218,10 @@ Item {
     push(root.suggestionResultRows(q))
     push(root.webFallbackRows(q))
 
+    root.finishRebuild(next)
+  }
+
+  function finishRebuild(next) {
     root.rows = next
 
     displayModel.clear()
@@ -1385,6 +1440,13 @@ Item {
     case "dmenu":
       root.finishRequest(String(r.payload.value || ""))
       root.dismiss()
+      break
+
+    case "prime":
+      // A category tap becomes the query it names; the rebuild that follows
+      // is the drill-in. The cursor lands at the end, ready to narrow.
+      input.text = String(r.payload.query || "")
+      input.cursorPosition = input.text.length
       break
     }
   }

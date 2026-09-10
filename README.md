@@ -30,9 +30,15 @@ Extra keybind (optional) in `~/.config/hypr/bindings.lua`:
 o.bind("CTRL + SPACE", "OmaRay", "omarchy-shell shell toggle datbuiquoc035.omaray '{}'")
 ```
 
-Frosted glass (optional) in `~/.config/hypr/looknfeel.lua` (needs global blur on):
+Frosted glass (optional) in `~/.config/hypr/looknfeel.lua` (needs global blur on —
+required at the current 0.20 card alpha, otherwise text floats on bare wallpaper):
 
 ```lua
+hl.config({
+  decoration = {
+    blur = { enabled = true, size = 8, passes = 3 },
+  },
+})
 hl.layer_rule({
   match = { namespace = "omarchy-omaray" },
   blur = true,
