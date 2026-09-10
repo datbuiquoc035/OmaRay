@@ -153,9 +153,6 @@ Item {
   // are built rather than after. maxApps is a user setting, so it is clamped
   // rather than trusted; the rest bound lists that arrive from outside.
   readonly property int maxAppRows: 24
-  // Idle shows categories above a short frecency-app block; typing
-  // anything switches to full search.
-  readonly property int maxIdleAppRows: 8
   // The Apps category shows the full list instead.
   readonly property int maxExpandedAppRows: 60
   // True while the Apps category is expanded; cleared on every open.
@@ -768,7 +765,7 @@ Item {
     })
 
     var limit = q ? Util.clamp(root.settings.maxApps, 3, root.maxAppRows)
-      : (root.appsExpanded ? root.maxExpandedAppRows : root.maxIdleAppRows)
+      : root.maxExpandedAppRows
     var out = []
     for (var j = 0; j < candidates.length && out.length < limit; j++) {
       var c = candidates[j]
@@ -1239,11 +1236,12 @@ Item {
     var next = []
     function push(list) { for (var i = 0; i < list.length; i++) next.push(list[i]) }
 
-    // Idle is the stock-menu-shaped front page: categories first, most-used
-    // apps below. Any keystroke leaves it for full search.
+    // Idle is the categories front page only; the Apps category (or the
+    // apps route) swaps in the full app list instead. Any keystroke leaves
+    // for full search.
     if (!q) {
       push(root.categoryRows())
-      push(root.appRows(q))
+      if (root.appsExpanded) push(root.appRows(q))
       root.rows = next
       root.finishRebuild(next)
       return

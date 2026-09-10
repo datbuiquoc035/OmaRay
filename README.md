@@ -7,12 +7,9 @@ reminders, calendar events, file search, clipboard history and web search —
 one input, ranked so the top row is the one you meant.
 
 An empty query shows the stock categories (Apps, Learn, Trigger, Style,
-Setup, Install, Remove, Update, About, System) above your most-used apps;
-a category primes its query, Apps expands the full app list, and any
-keystroke leaves for full search.
-
-Full provider manual: [docs/manual.md](docs/manual.md). Rebase notes:
-[docs/REBASE.md](docs/REBASE.md).
+Setup, Install, Remove, Update, About, System); a category primes its
+query, Apps expands the full app list, and any keystroke leaves for full
+search.
 
 ## What it answers
 
@@ -39,6 +36,7 @@ Full provider manual: [docs/manual.md](docs/manual.md). Rebase notes:
 | `⇧↵` | Secondary action (`.ics` file, previous setting value) |
 | `Tab` | Complete with the selected app's name |
 | `←` | Back to categories from a category view |
+| `→` | Open the selected category (empty query only) |
 | `Esc` | Close from a fresh prime or empty query, else clear first |
 
 ## Menu replacement

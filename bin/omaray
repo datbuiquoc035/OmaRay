@@ -37,7 +37,7 @@ cmd_install() {
   mkdir -p "$PLUGIN_DIR"
   cp "$ROOT/manifest.json" "$ROOT/OmaRay.qml" "$ROOT/BarWidget.qml" "$ROOT/omaray.example.json" \
     "$ROOT/README.md" "$ROOT/LICENSE" "$PLUGIN_DIR/"
-  cp -r "$ROOT/lib" "$ROOT/bin" "$ROOT/tests" "$ROOT/docs" "$PLUGIN_DIR/"
+  cp -r "$ROOT/lib" "$ROOT/bin" "$ROOT/tests" "$PLUGIN_DIR/"
   chmod +x "$PLUGIN_DIR/bin/omaray-helper" "$PLUGIN_DIR/bin/omaray"
   if [ -n "$enable" ]; then
     omarchy plugin enable "$PLUGIN_ID"
