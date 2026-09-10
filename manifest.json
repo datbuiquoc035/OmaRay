@@ -9,12 +9,21 @@
   "homepage": "https://github.com/datbuiquoc035/OmaRay",
   "kinds": [
     "overlay",
-    "menu"
+    "menu",
+    "bar-widget"
   ],
   "keepLoaded": true,
   "entryPoints": {
     "overlay": "OmaRay.qml",
-    "menu": "OmaRay.qml"
+    "menu": "OmaRay.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaRay",
+    "description": "Opens the OmaRay command palette",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "left"
   },
   "omarchy": {
     "clonedFrom": "omarchy.menu"

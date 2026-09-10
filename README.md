@@ -43,6 +43,7 @@ hl.layer_rule({
 ## Files
 
 - `OmaRay.qml` — UI and actions.
+- `BarWidget.qml` — bar button with the stock Omarchy glyph (\ue900).
 - `lib/` — parsers and ranking (Apps, Calc, Units, Fuzzy, Frecency, Commands,
   NaturalTime, Web, Emoji, Colors, Hotkeys, Settings, Routes, Dmenu).
 - `bin/omaray-helper` — bounded broker for every file read and subprocess.
@@ -70,6 +71,21 @@ search and the pickers.
 them: theme/font/plugin setup flows, timezone, file picker) route here:
 options narrow as you type with `width`/`maxheight` honored, Enter picks,
 Esc cancels, and a new request cancels a pending one.
+
+## Bar button
+
+`BarWidget.qml` shows the stock Omarchy glyph and toggles through the
+`omarchy.menu` route, so it keeps opening the palette even if OmaRay is
+disabled. To seat it where the stock button was:
+
+```bash
+omarchy plugin enable datbuiquoc035.omaray left
+omarchy bar move datbuiquoc035.omaray --section left --index 0
+```
+
+(Plain `omarchy bar put` will not seat a widget id that is already enabled
+in `plugins[]` — the enable-with-section form is the repeatable path, also
+after a disable cycle. Disabling swaps the stock button back automatically.)
 
 ## Settings
 
