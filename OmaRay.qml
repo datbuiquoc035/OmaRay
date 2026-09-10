@@ -2094,6 +2094,17 @@ Item {
                 input.text = ""
                 event.accepted = true
               }
+            } else if (event.key === Qt.Key_Right
+                && event.modifiers === Qt.NoModifier && !root.dmenuActive
+                && input.text.length === 0) {
+              // Right opens the selected category — the mirror of Left goes
+              // back. Only cat.* rows answer; on an app, or with text to move
+              // through, Right keeps its normal caret job.
+              var cat = root.selectedRow()
+              if (cat && cat.key && String(cat.key).indexOf("cat.") === 0) {
+                root.activate(root.selectedIndex, false)
+                event.accepted = true
+              }
             }
           }
         }
