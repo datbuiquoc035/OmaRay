@@ -164,6 +164,9 @@ Item {
   // Compared by value, so typing the same query by hand shows the same
   // view; any other query, or none, restores apps.
   property string primedNoAppsQuery: ""
+  // The query a category tap or route last primed, untouched since. Left
+  // backs out of exactly such a view; edited queries keep caret duty.
+  property string primedQuery: ""
   // The helper returns at most 40 hits; the list shows the first 10 of them.
   readonly property int maxFileRows: 10
   readonly property int maxClipboardRows: 8
@@ -235,6 +238,7 @@ Item {
     var routeArgv = null
     var routeApps = false
     var routeNoApps = false
+    var routeQuery = ""
     try {
       var rawPayload = String(payloadJson || "{}")
       if (rawPayload.length > root.maxPayloadChars) rawPayload = "{}"
@@ -251,6 +255,7 @@ Item {
       if (resolved && resolved.kind === "exec" && resolved.argv) routeArgv = resolved.argv
       else if (resolved && resolved.kind === "query" && !initial) {
         initial = resolved.query
+        routeQuery = resolved.query
         if (resolved.noApps) routeNoApps = true
       }
       else if (resolved && resolved.kind === "apps") routeApps = true
@@ -259,6 +264,7 @@ Item {
       routeArgv = null
       routeApps = false
       routeNoApps = false
+      routeQuery = ""
     }
 
     // Leaves run without the panel ever opening — the summon that named
@@ -274,6 +280,7 @@ Item {
     // categories front page. Reset on every open.
     root.appsExpanded = routeApps
     root.primedNoAppsQuery = routeNoApps ? initial : ""
+    root.primedQuery = routeQuery
     root.opened = true
     root.armedKey = ""
     root.rows = []
@@ -1484,12 +1491,14 @@ Item {
       // A category tap becomes the query it names; the rebuild that follows
       // is the drill-in. The cursor lands at the end, ready to narrow.
       root.primedNoAppsQuery = r.payload.noApps === true ? String(r.payload.query || "") : ""
+      root.primedQuery = String(r.payload.query || "")
       input.text = String(r.payload.query || "")
       input.cursorPosition = input.text.length
       break
 
     case "expand":
       root.appsExpanded = true
+      root.primedQuery = ""
       root.rebuild()
       break
     }
@@ -2064,13 +2073,22 @@ Item {
               if (sel && sel.kind === "app") input.text = sel.title
               event.accepted = true
             } else if (event.key === Qt.Key_Left
-                && root.appsExpanded && input.text.length === 0) {
-              // The Apps category has no Back row: Left steps back to the
-              // categories front page. With text present Left keeps its
-              // normal caret job.
-              root.appsExpanded = false
-              root.rebuild()
-              event.accepted = true
+                && event.modifiers === Qt.NoModifier && !root.dmenuActive) {
+              // Left leaves a category view: the expanded Apps list on an
+              // empty query, or a primed query still pristine since its tap
+              // (same text, caret never moved). Anything edited or navigated,
+              // and every picker field, keeps caret duty.
+              if (root.appsExpanded && input.text.length === 0) {
+                root.appsExpanded = false
+                root.rebuild()
+                event.accepted = true
+              } else if (root.primedQuery !== "" && input.text === root.primedQuery
+                  && input.cursorPosition === input.text.length) {
+                root.primedQuery = ""
+                root.primedNoAppsQuery = ""
+                input.text = ""
+                event.accepted = true
+              }
             }
           }
         }
