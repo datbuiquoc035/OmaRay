@@ -2579,45 +2579,42 @@ Item {
         anchors.bottomMargin: root.hairline
         height: root.footerHeight
 
+        Row {
+          anchors.left: parent.left
+          anchors.leftMargin: root.gutter
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(6)
+
+          Text {
+            text: "\ue900"
+            textFormat: Text.PlainText
+            color: root.foreground
+            opacity: 0.5
+            font.family: "omarchy"
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            text: "Omarchy"
+            textFormat: Text.PlainText
+            color: root.foreground
+            opacity: 0.35
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+
         Text {
-          text: "󰣇  Omarchy"
+          text: (root.manifest && root.manifest.version) ? String(root.manifest.version) : ""
+          visible: text.length > 0
           textFormat: Text.PlainText
           color: root.foreground
           opacity: 0.35
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
-          anchors.left: parent.left
-          anchors.leftMargin: root.gutter
-          anchors.verticalCenter: parent.verticalCenter
-        }
-
-        Row {
           anchors.right: parent.right
           anchors.rightMargin: root.gutter
           anchors.verticalCenter: parent.verticalCenter
-          spacing: Style.space(14)
-
-          Text {
-            readonly property var sel: root.selectedRow()
-            text: sel && sel.primaryLabel ? "↵  " + sel.primaryLabel : ""
-            visible: text.length > 0
-            textFormat: Text.PlainText
-            color: root.foreground
-            opacity: 0.55
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
-
-          Text {
-            readonly property var sel: root.selectedRow()
-            text: sel && sel.secondaryLabel ? "⇧↵  " + sel.secondaryLabel : ""
-            visible: text.length > 0
-            textFormat: Text.PlainText
-            color: root.foreground
-            opacity: 0.4
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-          }
         }
       }
     }
