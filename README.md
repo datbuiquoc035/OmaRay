@@ -12,6 +12,34 @@ stock subtrees to browse and run (inapplicable rows hidden); Apps expands
 the full app list, System primes its query — ← climbs back out. Any
 keystroke leaves for full search.
 
+## Install
+
+```bash
+omarchy plugin add https://github.com/datbuiquoc035/OmaRay.git --enable
+omarchy restart shell   # keepLoaded plugins load on a fresh shell
+```
+
+Enabling takes Super+Space and every `omarchy menu` route; the bar button
+takes the stock menu's seat.
+
+## Update
+
+```bash
+omarchy plugin update datbuiquoc035.omaray
+omarchy restart shell
+```
+
+## Remove
+
+```bash
+omarchy plugin remove datbuiquoc035.omaray
+```
+
+Disabling alone is enough to restore the stock menu and bar button; remove
+also deletes the plugin directory. Settings (`~/.config/omarchy/omaray.json`)
+and ranking (`~/.local/state/omaray/`) are left behind — delete them to
+forget everything.
+
 ## What it answers
 
 | Type this | You get |
