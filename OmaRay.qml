@@ -1025,13 +1025,13 @@ Item {
     if (root.appsExpanded) return []
     var defs = [
       { key: "cat.apps", title: "Apps", subtitle: "Your applications", icon: "󰀻", expand: true },
-      { key: "cat.learn", title: "Learn", subtitle: "Docs and wikis", icon: "󰖟", query: "docs" },
-      { key: "cat.trigger", title: "Trigger", subtitle: "Capture, record, tools", icon: "󰩭", query: "screenshot" },
-      { key: "cat.style", title: "Style", subtitle: "Theme, wallpaper, font", icon: "󰸌", query: "theme" },
-      { key: "cat.setup", title: "Setup", subtitle: "Configure the system", icon: "󰒓", query: "config" },
+      { key: "cat.learn", title: "Learn", subtitle: "Docs, wikis, keybindings", icon: "󰖟", scope: "learn" },
+      { key: "cat.trigger", title: "Trigger", subtitle: "Emoji, capture, tools", icon: "󰩭", scope: "trigger" },
+      { key: "cat.style", title: "Style", subtitle: "Theme, background, font", icon: "󰸌", scope: "style" },
+      { key: "cat.setup", title: "Setup", subtitle: "Configure the system", icon: "󰒓", scope: "setup" },
       { key: "cat.install", title: "Install", subtitle: "Add software, stock options", icon: "󰉋", scope: "install" },
       { key: "cat.remove", title: "Remove", subtitle: "Remove software, stock options", icon: "󰩹", scope: "remove" },
-      { key: "cat.update", title: "Update", subtitle: "Omarchy and packages", icon: "󰚰", argv: ["omarchy", "launch", "tui", "omarchy-update"] },
+      { key: "cat.update", title: "Update", subtitle: "Update, upgrade, packages", icon: "󰚰", scope: "update" },
       { key: "cat.about", title: "About", subtitle: "This system", icon: "󰋼", argv: ["omarchy", "launch", "about"] },
       { key: "cat.system", title: "System", subtitle: "Lock, log out, restart, shut down", icon: "󰐥", query: "system", noApps: true }
     ]

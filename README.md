@@ -7,9 +7,9 @@ reminders, calendar events, file search, clipboard history and web search —
 one input, ranked so the top row is the one you meant.
 
 An empty query shows the stock categories (Apps, Learn, Trigger, Style,
-Setup, Install, Remove, Update, About, System); a category primes its
-query, Apps expands the full app list, and Install/Remove browse the stock
-subtrees (with inapplicable rows hidden) — ← climbs back out. Any
+Setup, Install, Remove, Update, About, System). Categories open their
+stock subtrees to browse and run (inapplicable rows hidden); Apps expands
+the full app list, System primes its query — ← climbs back out. Any
 keystroke leaves for full search.
 
 ## What it answers
