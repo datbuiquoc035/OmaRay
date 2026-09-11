@@ -8,8 +8,9 @@ one input, ranked so the top row is the one you meant.
 
 An empty query shows the stock categories (Apps, Learn, Trigger, Style,
 Setup, Install, Remove, Update, About, System); a category primes its
-query, Apps expands the full app list, and any keystroke leaves for full
-search.
+query, Apps expands the full app list, and Install/Remove browse the stock
+subtrees (with inapplicable rows hidden) — ← climbs back out. Any
+keystroke leaves for full search.
 
 ## What it answers
 

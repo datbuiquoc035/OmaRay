@@ -18,6 +18,7 @@ import "lib/Hotkeys.js" as Hotkeys
 import "lib/Settings.js" as Settings
 import "lib/Routes.js" as Routes
 import "lib/Dmenu.js" as Dmenu
+import "lib/Menu.js" as Menu
 
 // OmaRay — a Raycast-shaped command palette for Omarchy.
 //
@@ -115,6 +116,13 @@ Item {
   property bool requestActive: false
   property int dmenuWidth: 300
   property int dmenuMaxHeight: 0
+
+  // Stock-menu browsing state: the merged install/remove tree, guard
+  // answers, and the scope currently open ("" = front page).
+  property var menuItems: ({})
+  property var menuOrder: []
+  property var menuGuards: ({})
+  property string menuScope: ""
 
   // Destructive commands need a second Enter. Holds the row key that is armed.
   property string armedKey: ""
@@ -284,6 +292,7 @@ Item {
     root.appsExpanded = routeApps
     root.primedNoAppsQuery = routeNoApps ? initial : ""
     root.primedQuery = routeQuery
+    root.menuScope = ""
     root.opened = true
     root.armedKey = ""
     root.rows = []
@@ -309,6 +318,7 @@ Item {
     root.refreshReminders()
     root.refreshEmojis()
     root.refreshHotkeys(false)
+    root.refreshMenuTree()
     root.rebuild()
     pointerGate.reset()
     Qt.callLater(function() {
@@ -346,6 +356,8 @@ Item {
   function openDmenu(payload) {
     if (root.requestActive) root.finishRequest(null)
     root.stopQueryWork()
+    root.menuScope = ""
+    root.appsExpanded = false
     root.dmenuMode = payload.mode === "input" ? "input" : "select"
     root.dmenuPrompt = String(payload.prompt || (root.dmenuMode === "input" ? "Input" : "Select"))
     var opts = Array.isArray(payload.options) ? payload.options : []
@@ -458,6 +470,70 @@ Item {
     hotkeysProc.running = false
     hotkeysProc.command = root.helperArgv(["hotkeys"])
     hotkeysProc.running = true
+  }
+
+  // The stock install/remove tree, live from Omarchy's own data (plus user
+  // extensions). Read on every open; guards follow in one batch.
+  function refreshMenuTree() {
+    menuTreeProc.running = false
+    menuTreeProc.command = root.helperArgv(["menu-tree"])
+    menuTreeProc.running = true
+  }
+
+  function loadMenuTree(raw) {
+    var reply = root.helperReply(raw)
+    var list = (reply && Array.isArray(reply.items)) ? reply.items : []
+    var items = ({})
+    var order = []
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i]
+      if (!e || typeof e.id !== "string" || !e.id) continue
+      items[e.id] = {
+        id: e.id,
+        parent: String(e.parent || ""),
+        kind: String(e.kind || "menu"),
+        icon: String(e.icon || ""),
+        label: String(e.label || e.id),
+        target: String(e.target || ""),
+        action: String(e.action || ""),
+        when: String(e.when || "")
+      }
+      order.push(e.id)
+    }
+    root.menuItems = items
+    root.menuOrder = order
+    root.refreshMenuGuards()
+    if (root.opened) root.rebuild()
+  }
+
+  function refreshMenuGuards() {
+    var wanted = {}
+    var count = 0
+    for (var i = 0; i < root.menuOrder.length; i++) {
+      var e = root.menuItems[root.menuOrder[i]]
+      if (e && e.when) {
+        if (wanted[e.id] === undefined) count++
+        wanted[e.id] = e.when
+      }
+    }
+    if (count === 0) {
+      root.menuGuards = ({})
+      return
+    }
+    menuGuardsProc.stdinEnabled = true
+    menuGuardsProc.command = root.helperArgv(["menu-guards"])
+    menuGuardsProc.running = true
+    menuGuardsProc.write(JSON.stringify(wanted))
+    menuGuardsProc.stdinEnabled = false
+  }
+
+  function loadMenuGuards(raw) {
+    var reply = root.helperReply(raw)
+    var guards = (reply && reply.guards && typeof reply.guards === "object") ? reply.guards : {}
+    var next = ({})
+    for (var k in guards) next[k] = guards[k] === true
+    root.menuGuards = next
+    if (root.opened) root.rebuild()
   }
 
   // Escape and successful activations go through here so the shell's
@@ -588,6 +664,7 @@ Item {
       subtitle: String(spec.subtitle || "").slice(0, root.maxSubtitleChars),
       accessory: String(spec.accessory || "").slice(0, 128),
       icon: String(spec.icon || "").slice(0, 128),
+      iconFont: String(spec.iconFont || "").slice(0, 64),
       image: String(spec.image || "").slice(0, 2048),
       mono: spec.mono === true,
       primaryLabel: spec.primaryLabel || "Open",
@@ -952,8 +1029,8 @@ Item {
       { key: "cat.trigger", title: "Trigger", subtitle: "Capture, record, tools", icon: "󰩭", query: "screenshot" },
       { key: "cat.style", title: "Style", subtitle: "Theme, wallpaper, font", icon: "󰸌", query: "theme" },
       { key: "cat.setup", title: "Setup", subtitle: "Configure the system", icon: "󰒓", query: "config" },
-      { key: "cat.install", title: "Install", subtitle: "Add software", icon: "󰉋", argv: ["xdg-terminal-exec", "--app-id=org.omarchy.terminal", "omarchy-pkg-install"] },
-      { key: "cat.remove", title: "Remove", subtitle: "Remove software", icon: "󰩹", argv: ["xdg-terminal-exec", "--app-id=org.omarchy.terminal", "omarchy-pkg-remove"] },
+      { key: "cat.install", title: "Install", subtitle: "Add software, stock options", icon: "󰉋", scope: "install" },
+      { key: "cat.remove", title: "Remove", subtitle: "Remove software, stock options", icon: "󰩹", scope: "remove" },
       { key: "cat.update", title: "Update", subtitle: "Omarchy and packages", icon: "󰚰", argv: ["omarchy", "launch", "tui", "omarchy-update"] },
       { key: "cat.about", title: "About", subtitle: "This system", icon: "󰋼", argv: ["omarchy", "launch", "about"] },
       { key: "cat.system", title: "System", subtitle: "Lock, log out, restart, shut down", icon: "󰐥", query: "system", noApps: true }
@@ -976,6 +1053,14 @@ Item {
           accessory: "Category", icon: d.icon,
           primaryLabel: "Browse",
           payload: {}
+        }))
+      } else if (d.scope) {
+        out.push(root.row({
+          key: d.key, section: "Categories", kind: "menuscope",
+          title: d.title, subtitle: d.subtitle,
+          accessory: "Category", icon: d.icon,
+          primaryLabel: "Browse",
+          payload: { scope: d.scope }
         }))
       } else {
         out.push(root.row({
@@ -1002,6 +1087,45 @@ Item {
       primaryLabel: "Open",
       payload: { argv: ["omarchy", "menu", "keybindings"] }
     })]
+  }
+
+  // Stock install/remove browsing: the children of the open scope, leaves
+  // running their stock actions, submenus drilling deeper. Guarded-out rows
+  // stay hidden; while guards are still in flight everything shows. Typing
+  // narrows by label, the way pickers narrow options.
+  function menuScopeRows() {
+    var scope = root.menuScope
+    if (!scope) return []
+    var q = String(root.query || "").trim().toLowerCase()
+    var merged = { items: root.menuItems, order: root.menuOrder }
+    var kids = Menu.childrenOf(merged, scope)
+    var head = root.menuItems[scope]
+    var section = (head && head.label) ? head.label : "Menu"
+    var out = []
+    for (var i = 0; i < kids.length; i++) {
+      var e = kids[i]
+      if (e.when && root.menuGuards[e.id] === false) continue
+      if (q && e.label.toLowerCase().indexOf(q) < 0) continue
+      if (e.kind === "action" && e.action) {
+        out.push(root.row({
+          key: "menu:" + e.id, section: section, kind: "menuaction",
+          title: e.label, subtitle: "",
+          accessory: section, icon: e.icon, iconFont: "omarchy",
+          primaryLabel: "Run",
+          payload: { action: e.action }
+        }))
+      } else {
+        var target = e.kind === "link" && e.target ? e.target : e.id
+        out.push(root.row({
+          key: "menu:" + e.id, section: section, kind: "menuscope",
+          title: e.label, subtitle: "",
+          accessory: section, icon: e.icon, iconFont: "omarchy",
+          primaryLabel: "Open",
+          payload: { scope: target }
+        }))
+      }
+    }
+    return out
   }
 
   function clipboardQuery(q) {
@@ -1234,6 +1358,7 @@ Item {
           rowSubtitle: pd.subtitle,
           rowAccessory: pd.accessory,
           rowIcon: pd.icon,
+          rowIconFont: "",
           rowImage: pd.image,
           rowMono: pd.mono,
           selectable: pd.kind !== "noop"
@@ -1256,11 +1381,14 @@ Item {
     function push(list) { for (var i = 0; i < list.length; i++) next.push(list[i]) }
 
     // Idle is the categories front page only; the Apps category (or the
-    // apps route) swaps in the full app list instead. Any keystroke leaves
-    // for full search.
+    // apps route) swaps in the full app list instead, and Install/Remove
+    // open the stock subtrees. Any keystroke leaves for full search.
     if (!q) {
-      push(root.categoryRows())
-      if (root.appsExpanded) push(root.appRows(q))
+      if (root.menuScope) push(root.menuScopeRows())
+      else {
+        push(root.categoryRows())
+        if (root.appsExpanded) push(root.appRows(q))
+      }
       root.rows = next
       root.finishRebuild(next)
       return
@@ -1298,6 +1426,7 @@ Item {
         rowSubtitle: r.subtitle,
         rowAccessory: r.accessory,
         rowIcon: r.icon,
+        rowIconFont: r.iconFont,
         rowImage: r.image,
         rowMono: r.mono,
         selectable: r.kind !== "noop"
@@ -1519,6 +1648,19 @@ Item {
       root.appsExpanded = true
       root.primedQuery = ""
       root.rebuild()
+      break
+
+    case "menuscope":
+      root.menuScope = String(r.payload.scope || "")
+      root.rebuild()
+      break
+
+    case "menuaction":
+      // Stock menu actions are shell strings, run exactly the way the stock
+      // menu runs them. The data is first-party packaged (root-owned) plus
+      // the user's own extensions — the same trust the menu itself has.
+      root.dismiss()
+      if (String(r.payload.action || "")) Util.execDetached(String(r.payload.action))
       break
     }
   }
@@ -1851,6 +1993,22 @@ Item {
   }
 
   Process {
+    id: menuTreeProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadMenuTree(text)
+    }
+  }
+
+  Process {
+    id: menuGuardsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadMenuGuards(text)
+    }
+  }
+
+  Process {
     id: dmenuFinishProc
   }
 
@@ -1903,6 +2061,8 @@ Item {
     settingsWriteProc.running = false
     emojiProc.running = false
     hotkeysProc.running = false
+    menuTreeProc.running = false
+    menuGuardsProc.running = false
     hidesProc.running = false
     usageReadProc.running = false
     usageWriteProc.running = false
@@ -2097,11 +2257,15 @@ Item {
               event.accepted = true
             } else if (event.key === Qt.Key_Left
                 && event.modifiers === Qt.NoModifier && !root.dmenuActive) {
-              // Left leaves a category view: the expanded Apps list on an
-              // empty query, or a primed query still pristine since its tap
-              // (same text, caret never moved). Anything edited or navigated,
-              // and every picker field, keeps caret duty.
-              if (root.appsExpanded && input.text.length === 0) {
+              // Left climbs out: one scope level, the expanded Apps list on
+              // an empty query, or a primed query still pristine since its
+              // tap (same text, caret never moved). Anything edited or
+              // navigated, and every picker field, keeps caret duty.
+              if (root.menuScope) {
+                root.menuScope = Menu.parentScope(root.menuScope)
+                root.rebuild()
+                event.accepted = true
+              } else if (root.appsExpanded && input.text.length === 0) {
                 root.appsExpanded = false
                 root.rebuild()
                 event.accepted = true
@@ -2195,6 +2359,7 @@ Item {
             required property string rowSubtitle
             required property string rowAccessory
             required property string rowIcon
+            required property string rowIconFont
             required property string rowImage
             required property bool rowMono
             required property bool selectable
@@ -2240,7 +2405,7 @@ Item {
               textFormat: Text.PlainText
               color: resultRow.hasCursor ? root.selectedText : root.foreground
               opacity: resultRow.hasCursor ? 1 : 0.75
-              font.family: root.fontFamily
+              font.family: resultRow.rowIconFont.length > 0 ? resultRow.rowIconFont : root.fontFamily
               font.pixelSize: Style.font.icon
               width: Style.space(20)
               horizontalAlignment: Text.AlignHCenter

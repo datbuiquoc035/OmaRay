@@ -206,5 +206,60 @@ class HelperTests(unittest.TestCase):
             self.assertFalse(json.loads(relative.stdout.decode())["ok"])
 
 
+    def test_menu_normalizer_keeps_well_formed_rows(self):
+        rows = HELPER.normalize_menu({
+            "install": {"label": "Install", "icon": "x"},
+            "install.vim": {"label": "Vim", "action": "omarchy-install-app Vim vim",
+                            "when": "omarchy-pkg-missing vim"},
+            "bad id!": {"label": "Bad"},
+            "ok_id-1.2": "not a dict",
+        })
+        by_id = {r["id"]: r for r in rows}
+        self.assertEqual(by_id["install"]["parent"], "root")
+        self.assertEqual(by_id["install"]["kind"], "menu")
+        self.assertEqual(by_id["install.vim"]["parent"], "install")
+        self.assertEqual(by_id["install.vim"]["kind"], "action")
+        self.assertNotIn("bad id!", by_id)
+        self.assertNotIn("ok_id-1.2", by_id)
+        self.assertEqual(HELPER.normalize_menu([]), [])
+
+    def test_menu_guards_answer_true_false_and_drop_garbage(self):
+        proc = subprocess.run(
+            [str(HELPER_PATH), "menu-guards"],
+            input=b'{"a.b": "true", "c.d": "false", "evil!id": "true", "e.f": ""}',
+            capture_output=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        guards = json.loads(proc.stdout.decode())["guards"]
+        self.assertTrue(guards["a.b"])
+        self.assertFalse(guards["c.d"])
+        self.assertNotIn("evil!id", guards)
+        self.assertNotIn("e.f", guards)
+
+    def test_menu_guards_reject_non_json(self):
+        proc = subprocess.run(
+            [str(HELPER_PATH), "menu-guards"],
+            input=b"nope", capture_output=True, timeout=30)
+        self.assertFalse(json.loads(proc.stdout.decode())["ok"])
+
+    def test_user_menu_extensions_read_from_scratch_home(self):
+        with tempfile.TemporaryDirectory() as home:
+            ext = Path(home) / ".config" / "omarchy" / "extensions"
+            ext.mkdir(parents=True)
+            (ext / "omarchy-menu.jsonc").write_text(
+                '// comment\n{"my.tool": {"label": "Mine", "action": "run-it",},}')
+            real_home = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                rows = HELPER._read_menu_jsonc(False)
+            finally:
+                if real_home is None:
+                    del os.environ["HOME"]
+                else:
+                    os.environ["HOME"] = real_home
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["id"], "my.tool")
+            self.assertEqual(rows[0]["parent"], "my")
+
+
 if __name__ == "__main__":
     unittest.main()
