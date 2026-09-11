@@ -19,6 +19,7 @@ import "lib/Settings.js" as Settings
 import "lib/Routes.js" as Routes
 import "lib/Dmenu.js" as Dmenu
 import "lib/Menu.js" as Menu
+import "lib/Categories.js" as Categories
 
 // OmaRay — a Raycast-shaped command palette for Omarchy.
 //
@@ -1017,32 +1018,28 @@ Item {
     return out
   }
 
-  // Idle front page, named exactly like the stock menu root. Each row primes
-  // its query (or runs, for the self-contained leaves) instead of drilling
-  // into a submenu tree, which this palette deliberately does not have —
-  // mixed/interactive submenus (Trigger's tools, Setup's editors, Install's
-  // pickers) have no single flat answer, so they prime the closest query
-  // and the rest stays a keystroke away in search. The Apps row expands the
-  // full frecency app list in place; Esc closes as usual, and Left arrow
-  // steps back to categories while the query is empty.
+  // Idle front page: the ten stock categories from lib/Categories.js. Rows
+  // drill into scopes, expand Apps, prime queries or run leaves; Esc closes
+  // as usual, and Left arrow steps back to categories while the query is
+  // empty.
   function categoryRows() {
     if (root.appsExpanded) return []
-    var defs = [
-      { key: "cat.apps", title: "Apps", subtitle: "Your applications", icon: "󰀻", expand: true },
-      { key: "cat.learn", title: "Learn", subtitle: "Docs, wikis, keybindings", icon: "󰖟", scope: "learn" },
-      { key: "cat.trigger", title: "Trigger", subtitle: "Emoji, capture, tools", icon: "󰩭", scope: "trigger" },
-      { key: "cat.style", title: "Style", subtitle: "Theme, background, font", icon: "󰸌", scope: "style" },
-      { key: "cat.setup", title: "Setup", subtitle: "Configure the system", icon: "󰒓", scope: "setup" },
-      { key: "cat.install", title: "Install", subtitle: "Add software, stock options", icon: "󰉋", scope: "install" },
-      { key: "cat.remove", title: "Remove", subtitle: "Remove software, stock options", icon: "󰩹", scope: "remove" },
-      { key: "cat.update", title: "Update", subtitle: "Update, upgrade, packages", icon: "󰚰", scope: "update" },
-      { key: "cat.about", title: "About", subtitle: "This system", icon: "󰋼", argv: ["omarchy", "launch", "about"] },
-      { key: "cat.system", title: "System", subtitle: "Lock, log out, restart, shut down", icon: "󰐥", query: "system", noApps: true }
-    ]
+    return root.categoryRowList(Categories.defs())
+  }
+
+  // Categories stay visible while searching, ranked above everything but
+  // direct answers — typing "app" must offer Apps before any hotkey.
+  function categorySearchRows(q) {
+    if (!String(q || "").trim()) return []
+    var matches = Categories.match(q, root.fuzzyScore, 5)
+    return root.categoryRowList(matches)
+  }
+
+  function categoryRowList(defs) {
     var out = []
     for (var i = 0; i < defs.length; i++) {
       var d = defs[i]
-      if (d.argv) {
+      if (d.kind === "shell") {
         out.push(root.row({
           key: d.key, section: "Categories", kind: "shell",
           title: d.title, subtitle: d.subtitle,
@@ -1050,7 +1047,7 @@ Item {
           primaryLabel: "Open",
           payload: { argv: d.argv }
         }))
-      } else if (d.expand) {
+      } else if (d.kind === "expand") {
         out.push(root.row({
           key: d.key, section: "Categories", kind: "expand",
           title: d.title, subtitle: d.subtitle,
@@ -1058,7 +1055,7 @@ Item {
           primaryLabel: "Browse",
           payload: {}
         }))
-      } else if (d.scope) {
+      } else if (d.kind === "menuscope") {
         out.push(root.row({
           key: d.key, section: "Categories", kind: "menuscope",
           title: d.title, subtitle: d.subtitle,
@@ -1466,6 +1463,7 @@ Item {
     }
 
     push(root.intentRows(q))
+    push(root.categorySearchRows(q))
     push(root.learnRows(q))
     push(root.colorRows(q))
     push(root.settingsRows(q))
@@ -1719,11 +1717,17 @@ Item {
     case "expand":
       root.appsExpanded = true
       root.primedQuery = ""
+      input.text = ""
       root.rebuild()
       break
 
     case "menuscope":
+      // Drilling in clears the query: the scope browses unfiltered, the
+      // way tapping a category from the front page does.
       root.menuScope = String(r.payload.scope || "")
+      root.primedQuery = ""
+      root.primedNoAppsQuery = ""
+      input.text = ""
       root.rebuild()
       break
 
