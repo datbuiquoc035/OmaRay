@@ -1267,6 +1267,7 @@ Item {
     }
 
     push(root.intentRows(q))
+    push(root.learnRows(q))
     push(root.colorRows(q))
     push(root.settingsRows(q))
     push(root.clipboardResultRows(q))
@@ -1276,7 +1277,6 @@ Item {
     push(root.emojiRows(q))
     push(root.bangRows(q))
     push(root.commandRows(q))
-    push(root.learnRows(q))
     push(root.hotkeyRows(q))
     push(root.fileResultRows(q))
     push(root.suggestionResultRows(q))
