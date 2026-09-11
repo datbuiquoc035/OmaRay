@@ -75,6 +75,40 @@ test("stock tiers ascend: exact, prefix, contains", () => {
   assert.equal(Menu.matchScore({ id: "e", label: "Anything" }, ""), 0)
 })
 
+test("aliases normalize from string or list, capped", () => {
+  assert.deepEqual(Menu.normalizeItem("x", { aliases: "solo" }).aliases, ["solo"])
+  assert.deepEqual(Menu.normalizeItem("x", { aliases: ["a", "", 7] }).aliases, ["a", "7"])
+  assert.deepEqual(Menu.normalizeItem("x", {}).aliases, [])
+})
+
+test("aliases join the name text", () => {
+  const e = { id: "x.y", label: "Why", aliases: ["power-menu"] }
+  assert.ok(Menu.matches(e, "power"))
+})
+
+test("inSubtree covers the root and everything below it", () => {
+  assert.ok(Menu.inSubtree("install", ["install", "remove"]))
+  assert.ok(Menu.inSubtree("install.editor.vim", ["install", "remove"]))
+  assert.ok(!Menu.inSubtree("installs", ["install"]))
+  assert.ok(!Menu.inSubtree("setup", ["install", "remove"]))
+})
+
+test("menuPath walks the parent chain", () => {
+  const items = {
+    install: { id: "install", parent: "root", label: "Install" },
+    "install.editor": { id: "install.editor", parent: "install", label: "Editor" },
+    "install.editor.vim": { id: "install.editor.vim", parent: "install.editor", label: "Vim" },
+  }
+  assert.equal(Menu.menuPath(items, "install.editor.vim"), "Install › Editor")
+  assert.equal(Menu.menuPath(items, "install"), "")
+  assert.equal(Menu.menuPath(items, "missing"), "")
+})
+
+test("AUR-style exact labels match", () => {
+  assert.equal(Menu.matchScore({ id: "install.aur", label: "AUR" }, "aur"), 0)
+  assert.ok(Menu.matchScore({ id: "install.editor", label: "Editor" }, "editor") >= 0)
+})
+
 test("hostile ids cannot pollute prototypes", () => {
   const merged = Menu.mergeSources([Menu.normalizeItem("__proto__", { label: "P" })], [])
   assert.equal({}.polluted, undefined)

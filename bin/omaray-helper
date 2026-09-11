@@ -665,6 +665,16 @@ def normalize_menu(parsed):
         action = _menu_field(raw.get("action"))
         target = _menu_field(raw.get("target"))
         kind = "action" if action else ("link" if target else "menu")
+        aliases = raw.get("aliases")
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        clean_aliases = []
+        if isinstance(aliases, list):
+            for alias in aliases:
+                if isinstance(alias, str) and alias.strip():
+                    clean_aliases.append(alias.strip()[:128])
+                    if len(clean_aliases) >= 20:
+                        break
         out.append({
             "id": mid,
             "parent": _menu_field(parent, 128),
@@ -674,6 +684,7 @@ def normalize_menu(parsed):
             "target": target,
             "action": action,
             "when": _menu_field(raw.get("when")),
+            "aliases": clean_aliases,
         })
         if len(out) >= MENU_ITEMS:
             break

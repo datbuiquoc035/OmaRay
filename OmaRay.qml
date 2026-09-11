@@ -496,7 +496,10 @@ Item {
         label: String(e.label || e.id),
         target: String(e.target || ""),
         action: String(e.action || ""),
-        when: String(e.when || "")
+        when: String(e.when || ""),
+        aliases: Array.isArray(e.aliases) ? e.aliases.filter(function(a) {
+          return typeof a === "string" && a
+        }).slice(0, 20) : []
       }
       order.push(e.id)
     }
@@ -1140,6 +1143,60 @@ Item {
     return out
   }
 
+  // Global search over the stock install/remove subtrees, so "aur" finds
+  // the AUR installer and "editor" the Editor subcategory — the way the
+  // stock menu searches its whole tree. Leaves run, submenus drill in,
+  // guarded-out rows stay hidden.
+  readonly property var menuSearchRoots: ["install", "remove"]
+  readonly property int maxMenuSearchRows: 7
+
+  function menuSearchRows(q) {
+    var query = String(q || "").trim()
+    if (!query) return []
+    var scored = []
+    for (var i = 0; i < root.menuOrder.length; i++) {
+      var id = root.menuOrder[i]
+      if (!Menu.inSubtree(id, root.menuSearchRoots)) continue
+      var e = root.menuItems[id]
+      if (!e) continue
+      if (e.when && root.menuGuards[e.id] === false) continue
+      var s = Menu.matchScore({
+        id: e.id, label: e.label,
+        keywords: "", aliases: e.aliases, description: ""
+      }, query)
+      if (s < 0) continue
+      scored.push({ entry: e, score: s, order: i })
+    }
+    scored.sort(function(a, b) {
+      if (a.score !== b.score) return a.score - b.score
+      return a.order - b.order
+    })
+    var out = []
+    for (var j = 0; j < scored.length && out.length < root.maxMenuSearchRows; j++) {
+      var m = scored[j].entry
+      var path = Menu.menuPath(root.menuItems, m.id)
+      if (m.kind === "action" && m.action) {
+        out.push(root.row({
+          key: "menu:" + m.id, section: "Menu", kind: "menuaction",
+          title: m.label, subtitle: path,
+          accessory: "Menu", icon: m.icon, iconFont: "omarchy",
+          primaryLabel: "Run",
+          payload: { action: m.action }
+        }))
+      } else {
+        var target = m.kind === "link" && m.target ? m.target : m.id
+        out.push(root.row({
+          key: "menu:" + m.id, section: "Menu", kind: "menuscope",
+          title: m.label, subtitle: path,
+          accessory: "Menu", icon: m.icon, iconFont: "omarchy",
+          primaryLabel: "Open",
+          payload: { scope: target }
+        }))
+      }
+    }
+    return out
+  }
+
   function clipboardQuery(q) {
     var m = String(q || "").match(/^(?:cb|clip|clipboard)\s+(\S.*)$/i)
     return m ? m[1].trim() : ""
@@ -1417,6 +1474,7 @@ Item {
     push(root.emojiRows(q))
     push(root.bangRows(q))
     push(root.commandRows(q))
+    push(root.menuSearchRows(q))
     push(root.hotkeyRows(q))
     push(root.fileResultRows(q))
     push(root.suggestionResultRows(q))
