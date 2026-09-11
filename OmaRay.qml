@@ -1101,25 +1101,37 @@ Item {
     var kids = Menu.childrenOf(merged, scope)
     var head = root.menuItems[scope]
     var section = (head && head.label) ? head.label : "Menu"
-    var out = []
+    // Stock matching: per-term substring admission over label and leaf id,
+    // ascending tiers, file order breaking ties.
+    var scored = []
     for (var i = 0; i < kids.length; i++) {
       var e = kids[i]
       if (e.when && root.menuGuards[e.id] === false) continue
-      if (q && e.label.toLowerCase().indexOf(q) < 0) continue
-      if (e.kind === "action" && e.action) {
+      var s = Menu.matchScore({ id: e.id, label: e.label }, q)
+      if (s < 0) continue
+      scored.push({ entry: e, score: s, order: i })
+    }
+    scored.sort(function(a, b) {
+      if (a.score !== b.score) return a.score - b.score
+      return a.order - b.order
+    })
+    var out = []
+    for (var j = 0; j < scored.length; j++) {
+      var m = scored[j].entry
+      if (m.kind === "action" && m.action) {
         out.push(root.row({
-          key: "menu:" + e.id, section: section, kind: "menuaction",
-          title: e.label, subtitle: "",
-          accessory: section, icon: e.icon, iconFont: "omarchy",
+          key: "menu:" + m.id, section: section, kind: "menuaction",
+          title: m.label, subtitle: "",
+          accessory: section, icon: m.icon, iconFont: "omarchy",
           primaryLabel: "Run",
-          payload: { action: e.action }
+          payload: { action: m.action }
         }))
       } else {
-        var target = e.kind === "link" && e.target ? e.target : e.id
+        var target = m.kind === "link" && m.target ? m.target : m.id
         out.push(root.row({
-          key: "menu:" + e.id, section: section, kind: "menuscope",
-          title: e.label, subtitle: "",
-          accessory: section, icon: e.icon, iconFont: "omarchy",
+          key: "menu:" + m.id, section: section, kind: "menuscope",
+          title: m.label, subtitle: "",
+          accessory: section, icon: m.icon, iconFont: "omarchy",
           primaryLabel: "Open",
           payload: { scope: target }
         }))

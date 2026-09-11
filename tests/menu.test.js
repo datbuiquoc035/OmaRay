@@ -49,6 +49,32 @@ test("parentScope climbs one level", () => {
   assert.equal(Menu.parentScope(""), "")
 })
 
+test("stock admission: every term a substring of name text", () => {
+  const e = { id: "install.editor.vscode", label: "VSCode" }
+  assert.ok(Menu.matches(e, "vscode"))
+  assert.ok(Menu.matches(e, "code"))
+  assert.ok(Menu.matches(e, "vs code"))
+  assert.ok(!Menu.matches(e, "vscode zebra"))
+  // No acronyms, unlike Fuzzy: "vsc" is not a substring of anything here.
+  assert.ok(!Menu.matches({ id: "x.y", label: "Visual Studio Code" }, "vsc"))
+})
+
+test("description matches whole words only", () => {
+  const e = { id: "x.y", label: "Y", description: "fast package manager" }
+  assert.ok(Menu.matches(e, "package"))
+  assert.ok(!Menu.matches(e, "pack"))
+})
+
+test("stock tiers ascend: exact, prefix, contains", () => {
+  const q = "term";
+  const exact = Menu.matchScore({ id: "a", label: "Term" }, q)
+  const prefix = Menu.matchScore({ id: "b", label: "Terminal" }, q)
+  const contains = Menu.matchScore({ id: "c", label: "Long Term Goal" }, q)
+  assert.ok(exact < prefix && prefix < contains)
+  assert.equal(Menu.matchScore({ id: "d", label: "Other" }, q), -1)
+  assert.equal(Menu.matchScore({ id: "e", label: "Anything" }, ""), 0)
+})
+
 test("hostile ids cannot pollute prototypes", () => {
   const merged = Menu.mergeSources([Menu.normalizeItem("__proto__", { label: "P" })], [])
   assert.equal({}.polluted, undefined)
