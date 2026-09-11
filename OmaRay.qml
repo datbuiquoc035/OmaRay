@@ -169,7 +169,12 @@ Item {
   readonly property int maxClipboardRows: 8
   readonly property int maxReminderRows: 50
   readonly property int maxQueryChars: 512
-  readonly property int maxPayloadChars: 4096
+  // Summon payloads carry whole option lists (228 keybinding records are
+  // ~22KB; timezone/file pickers are bigger), so this must clear them with
+  // headroom — unlike query text, which stays at 512. Downstream bounds
+  // still apply: Dmenu caps option count and length on ingest, and option
+  // strings are sliced again on the way into rows.
+  readonly property int maxPayloadChars: 262144
   readonly property int maxHelperPayloadChars: 524288
   readonly property int maxAppCandidates: 512
   readonly property int maxWindowCandidates: 256
