@@ -684,6 +684,7 @@ def normalize_menu(parsed):
             "target": target,
             "action": action,
             "when": _menu_field(raw.get("when")),
+            "description": _menu_field(raw.get("description"), 512),
             "aliases": clean_aliases,
         })
         if len(out) >= MENU_ITEMS:

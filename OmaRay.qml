@@ -497,6 +497,7 @@ Item {
         target: String(e.target || ""),
         action: String(e.action || ""),
         when: String(e.when || ""),
+        description: String(e.description || ""),
         aliases: Array.isArray(e.aliases) ? e.aliases.filter(function(a) {
           return typeof a === "string" && a
         }).slice(0, 20) : []
@@ -1143,11 +1144,12 @@ Item {
     return out
   }
 
-  // Global search over the stock install/remove subtrees, so "aur" finds
-  // the AUR installer and "editor" the Editor subcategory — the way the
-  // stock menu searches its whole tree. Leaves run, submenus drill in,
-  // guarded-out rows stay hidden.
-  readonly property var menuSearchRoots: ["install", "remove"]
+  // Global search over the whole stock tree — every category, subcategory
+  // and option — so "aur" finds the installer and "vpn" the VPN rows, the
+  // way the stock menu searches everything. Application rows are pushed
+  // earlier in rebuild, so apps still rank on top. Leaves run, submenus
+  // drill in, guarded-out rows stay hidden. Skipped: the root itself and
+  // the Apps node, whose children are provider-driven, not data.
   readonly property int maxMenuSearchRows: 7
 
   function menuSearchRows(q) {
@@ -1156,13 +1158,13 @@ Item {
     var scored = []
     for (var i = 0; i < root.menuOrder.length; i++) {
       var id = root.menuOrder[i]
-      if (!Menu.inSubtree(id, root.menuSearchRoots)) continue
+      if (id === "root" || id === "apps") continue
       var e = root.menuItems[id]
       if (!e) continue
       if (e.when && root.menuGuards[e.id] === false) continue
       var s = Menu.matchScore({
         id: e.id, label: e.label,
-        keywords: "", aliases: e.aliases, description: ""
+        keywords: "", aliases: e.aliases, description: e.description || ""
       }, query)
       if (s < 0) continue
       scored.push({ entry: e, score: s, order: i })

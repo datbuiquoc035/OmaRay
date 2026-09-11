@@ -65,6 +65,11 @@ test("description matches whole words only", () => {
   assert.ok(!Menu.matches(e, "pack"))
 })
 
+test("normalize keeps description", () => {
+  const e = Menu.normalizeItem("x.y", { label: "Y", description: "does things" })
+  assert.equal(e.description, "does things")
+})
+
 test("stock tiers ascend: exact, prefix, contains", () => {
   const q = "term";
   const exact = Menu.matchScore({ id: "a", label: "Term" }, q)
