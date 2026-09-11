@@ -990,6 +990,20 @@ Item {
     return out
   }
 
+  // The Learn category's subcategory: alongside the doc links, a row that
+  // opens the full keybindings list (same viewer as Super+K, through the
+  // dmenu select protocol back into this panel).
+  function learnRows(q) {
+    if (String(q || "").trim().toLowerCase() !== "docs") return []
+    return [root.row({
+      key: "learn.keybinds", section: "Learn", kind: "shell",
+      title: "Keybinds", subtitle: "Browse every Omarchy keybinding",
+      accessory: "Category", icon: "",
+      primaryLabel: "Open",
+      payload: { argv: ["omarchy", "menu", "keybindings"] }
+    })]
+  }
+
   function clipboardQuery(q) {
     var m = String(q || "").match(/^(?:cb|clip|clipboard)\s+(\S.*)$/i)
     return m ? m[1].trim() : ""
@@ -1262,6 +1276,7 @@ Item {
     push(root.emojiRows(q))
     push(root.bangRows(q))
     push(root.commandRows(q))
+    push(root.learnRows(q))
     push(root.hotkeyRows(q))
     push(root.fileResultRows(q))
     push(root.suggestionResultRows(q))
