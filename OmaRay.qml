@@ -20,6 +20,7 @@ import "lib/Routes.js" as Routes
 import "lib/Dmenu.js" as Dmenu
 import "lib/Menu.js" as Menu
 import "lib/Categories.js" as Categories
+import "lib/System.js" as System
 
 // OmaRay — a Raycast-shaped command palette for Omarchy.
 //
@@ -166,10 +167,8 @@ Item {
   readonly property int maxExpandedAppRows: 60
   // True while the Apps category is expanded; cleared on every open.
   property bool appsExpanded: false
-  // A primed query that hides app results (the System category view).
-  // Compared by value, so typing the same query by hand shows the same
-  // view; any other query, or none, restores apps.
-  property string primedNoAppsQuery: ""
+  // True while the System category is open; cleared on every open.
+  property bool systemExpanded: false
   // The query a category tap or route last primed, untouched since. Left
   // backs out of exactly such a view; edited queries keep caret duty.
   property string primedQuery: ""
@@ -249,7 +248,7 @@ Item {
     var initial = ""
     var routeArgv = null
     var routeApps = false
-    var routeNoApps = false
+    var routeSystem = false
     var routeQuery = ""
     try {
       var rawPayload = String(payloadJson || "{}")
@@ -268,14 +267,14 @@ Item {
       else if (resolved && resolved.kind === "query" && !initial) {
         initial = resolved.query
         routeQuery = resolved.query
-        if (resolved.noApps) routeNoApps = true
       }
       else if (resolved && resolved.kind === "apps") routeApps = true
+      else if (resolved && resolved.kind === "system") routeSystem = true
     } catch (e) {
       initial = ""
       routeArgv = null
       routeApps = false
-      routeNoApps = false
+      routeSystem = false
       routeQuery = ""
     }
 
@@ -291,9 +290,8 @@ Item {
     // The Apps category: the full frecency app list instead of the
     // categories front page. Reset on every open.
     root.appsExpanded = routeApps
-    root.primedNoAppsQuery = routeNoApps ? initial : ""
+    root.systemExpanded = routeSystem
     root.primedQuery = routeQuery
-    root.menuScope = ""
     root.opened = true
     root.armedKey = ""
     root.rows = []
@@ -359,6 +357,7 @@ Item {
     root.stopQueryWork()
     root.menuScope = ""
     root.appsExpanded = false
+    root.systemExpanded = false
     root.dmenuMode = payload.mode === "input" ? "input" : "select"
     root.dmenuPrompt = String(payload.prompt || (root.dmenuMode === "input" ? "Input" : "Select"))
     var opts = Array.isArray(payload.options) ? payload.options : []
@@ -514,13 +513,17 @@ Item {
   function refreshMenuGuards() {
     var wanted = {}
     var count = 0
+    function want(id, when) {
+      if (!when) return
+      if (wanted[id] === undefined) count++
+      wanted[id] = when
+    }
     for (var i = 0; i < root.menuOrder.length; i++) {
       var e = root.menuItems[root.menuOrder[i]]
-      if (e && e.when) {
-        if (wanted[e.id] === undefined) count++
-        wanted[e.id] = e.when
-      }
+      if (e && e.when) want(e.id, e.when)
     }
+    var sysDefs = System.defs()
+    for (var j = 0; j < sysDefs.length; j++) want(sysDefs[j].key, sysDefs[j].when)
     if (count === 0) {
       root.menuGuards = ({})
       return
@@ -824,9 +827,6 @@ Item {
   }
 
   function appRows(q) {
-    // The System category view (and any query primed with noApps) shows
-    // Commands, Hotkeys and web search only — never applications.
-    if (q && root.primedNoAppsQuery !== "" && q === root.primedNoAppsQuery) return []
     var entries = root.appEntries(q)
     var now = Date.now()
     var candidates = []
@@ -1055,6 +1055,14 @@ Item {
           primaryLabel: "Browse",
           payload: {}
         }))
+      } else if (d.kind === "system") {
+        out.push(root.row({
+          key: d.key, section: "Categories", kind: "system",
+          title: d.title, subtitle: d.subtitle,
+          accessory: "Category", icon: d.icon,
+          primaryLabel: "Browse",
+          payload: {}
+        }))
       } else if (d.kind === "menuscope") {
         out.push(root.row({
           key: d.key, section: "Categories", kind: "menuscope",
@@ -1069,7 +1077,7 @@ Item {
           title: d.title, subtitle: d.subtitle,
           accessory: "Category", icon: d.icon,
           primaryLabel: "Browse",
-          payload: { query: d.query, noApps: d.noApps === true }
+          payload: { query: d.query }
         }))
       }
     }
@@ -1192,6 +1200,26 @@ Item {
           payload: { scope: target }
         }))
       }
+    }
+    return out
+  }
+
+  // The System category: stock system.* rows verbatim, guarded like menu
+  // scope rows (Suspend hides when disabled, Hibernate without support).
+  function systemRows() {
+    var defs = System.defs()
+    var out = []
+    for (var i = 0; i < defs.length; i++) {
+      var d = defs[i]
+      if (d.when && root.menuGuards[d.key] === false) continue
+      out.push(root.row({
+        key: d.key, section: "System", kind: "menuaction",
+        title: d.title, subtitle: "",
+        accessory: "System", icon: d.icon,
+        primaryLabel: d.confirm ? "Confirm" : "Run",
+        confirm: d.confirm,
+        payload: { action: d.action }
+      }))
     }
     return out
   }
@@ -1448,11 +1476,12 @@ Item {
     var next = []
     function push(list) { for (var i = 0; i < list.length; i++) next.push(list[i]) }
 
-    // Idle is the categories front page only; the Apps category (or the
-    // apps route) swaps in the full app list instead, and Install/Remove
-    // open the stock subtrees. Any keystroke leaves for full search.
+    // Idle is the categories front page only; Apps expands the full app
+    // list, System shows its seven rows, Install/Remove open the stock
+    // subtrees. Any keystroke leaves for full search.
     if (!q) {
       if (root.menuScope) push(root.menuScopeRows())
+      else if (root.systemExpanded) push(root.systemRows())
       else {
         push(root.categoryRows())
         if (root.appsExpanded) push(root.appRows(q))
@@ -1708,7 +1737,6 @@ Item {
     case "prime":
       // A category tap becomes the query it names; the rebuild that follows
       // is the drill-in. The cursor lands at the end, ready to narrow.
-      root.primedNoAppsQuery = r.payload.noApps === true ? String(r.payload.query || "") : ""
       root.primedQuery = String(r.payload.query || "")
       input.text = String(r.payload.query || "")
       input.cursorPosition = input.text.length
@@ -1721,12 +1749,18 @@ Item {
       root.rebuild()
       break
 
+    case "system":
+      root.systemExpanded = true
+      root.primedQuery = ""
+      input.text = ""
+      root.rebuild()
+      break
+
     case "menuscope":
       // Drilling in clears the query: the scope browses unfiltered, the
       // way tapping a category from the front page does.
       root.menuScope = String(r.payload.scope || "")
       root.primedQuery = ""
-      root.primedNoAppsQuery = ""
       input.text = ""
       root.rebuild()
       break
@@ -2341,14 +2375,14 @@ Item {
                 root.menuScope = Menu.parentScope(root.menuScope)
                 root.rebuild()
                 event.accepted = true
-              } else if (root.appsExpanded && input.text.length === 0) {
+              } else if ((root.appsExpanded || root.systemExpanded) && input.text.length === 0) {
                 root.appsExpanded = false
+                root.systemExpanded = false
                 root.rebuild()
                 event.accepted = true
               } else if (root.primedQuery !== "" && input.text === root.primedQuery
                   && input.cursorPosition === input.text.length) {
                 root.primedQuery = ""
-                root.primedNoAppsQuery = ""
                 input.text = ""
                 event.accepted = true
               }

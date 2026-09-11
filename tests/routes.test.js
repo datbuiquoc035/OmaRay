@@ -8,8 +8,8 @@ test("root aliases open the palette", () => {
   }
 })
 
-test("system opens the System category primed, without apps", () => {
-  assert.deepEqual(Routes.resolve("system"), { kind: "query", query: "system", noApps: true })
+test("system opens the dedicated System view", () => {
+  assert.deepEqual(Routes.resolve("system"), { kind: "system" })
 })
 
 test("apps opens the Apps category expanded", () => {
