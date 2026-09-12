@@ -30,8 +30,8 @@ test("leaves run immediately as argv vectors", () => {
   const rec = Routes.resolve("trigger.capture.screenrecord")
   assert.equal(rec.kind, "exec")
   assert.deepEqual(rec.argv, ["omarchy", "capture", "screenrecording"])
-  assert.deepEqual(Routes.resolve("theme"), { kind: "exec", argv: ["omarchy", "theme", "switcher"] })
-  assert.deepEqual(Routes.resolve("background"), { kind: "exec", argv: ["omarchy", "theme", "bg-switcher"] })
+  assert.deepEqual(Routes.resolve("theme"), { kind: "exec", argv: ["bash", "-c", "theme=$(omarchy-theme-switcher); [[ -n $theme ]] && omarchy-theme-set \"$theme\""] })
+  assert.deepEqual(Routes.resolve("background"), { kind: "exec", argv: ["bash", "-c", "bg=$(omarchy-theme-bg-switcher); [[ -n $bg ]] && omarchy-theme-bg-set \"$bg\""] })
 })
 
 test("non-string routes fall through to open", () => {
