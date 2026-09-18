@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "datbuiquoc035.omaray",
+  "name": "OmaRay",
+  "version": "0.1.0-dev",
+  "author": "qdot",
+  "license": "MIT",
+  "description": "Spotlight-like Omarchy menu",
+  "homepage": "https://github.com/datbuiquoc035/OmaRay",
+  "kinds": [
+    "overlay",
+    "menu",
+    "bar-widget",
+    "productivity"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "OmaRay.qml",
+    "menu": "OmaRay.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaRay",
+    "description": "Opens the OmaRay main menu",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.menu"
+  }
+}
