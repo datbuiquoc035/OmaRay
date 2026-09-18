@@ -900,7 +900,14 @@ def cmd_write_usage():
 
 
 def _clipboard_entries():
-    fd = walk([".local", "state", "omaray"], create=True)
+    # Omarchy's own clipboard manager owns this file — ~/.local/state/omarchy,
+    # not this plugin's ~/.local/state/omaray (which holds usage.json). A
+    # previous revision read the latter, so the file was never found and every
+    # read-clipboard answered with an empty list.
+    try:
+        fd = walk([".local", "state", "omarchy"])
+    except FileNotFoundError:
+        return []
     try:
         parsed = read_json(fd, "clipboard-history.json", CLIPBOARD_BYTES, [])
     finally:

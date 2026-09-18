@@ -261,5 +261,39 @@ class HelperTests(unittest.TestCase):
             self.assertEqual(rows[0]["parent"], "my")
 
 
+    def test_clipboard_reads_omarchy_history_not_omaray_state(self):
+        with tempfile.TemporaryDirectory() as home:
+            owned = Path(home) / ".local" / "state" / "omarchy"
+            owned.mkdir(parents=True)
+            (owned / "clipboard-history.json").write_text(
+                json.dumps([{"type": "text", "text": "hello clipboard"}]))
+            # A decoy in the plugin's own state dir must never be consulted.
+            decoy = Path(home) / ".local" / "state" / "omaray"
+            decoy.mkdir(parents=True)
+            (decoy / "clipboard-history.json").write_text(
+                json.dumps([{"type": "text", "text": "wrong file"}]))
+            env = dict(os.environ, HOME=home)
+            proc = subprocess.run(
+                [str(HELPER_PATH), "read-clipboard"],
+                capture_output=True, env=env, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            reply = json.loads(proc.stdout.decode())
+            self.assertTrue(reply["ok"])
+            self.assertEqual(len(reply["items"]), 1)
+            self.assertEqual(reply["items"][0]["title"], "hello clipboard")
+
+    def test_clipboard_read_is_empty_without_history(self):
+        with tempfile.TemporaryDirectory() as home:
+            Path(home, ".local", "state").mkdir(parents=True)
+            env = dict(os.environ, HOME=home)
+            proc = subprocess.run(
+                [str(HELPER_PATH), "read-clipboard"],
+                capture_output=True, env=env, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            reply = json.loads(proc.stdout.decode())
+            self.assertTrue(reply["ok"])
+            self.assertEqual(reply["items"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
