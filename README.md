@@ -74,3 +74,7 @@ Each provider contributes zero or more rows; empty results are skipped.
 16. **Web suggestions** — live completions when `webSuggestions` is on
     (up to `maxSuggestions` rows).
 17. **Web fallback** — always last: `Search <engine> for "…"` for the full query.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
