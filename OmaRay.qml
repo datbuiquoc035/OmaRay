@@ -197,6 +197,101 @@ Item {
     maxSuggestions: 4
   })
 
+  // ------------------------------------------------------------- preview pane
+  // Right-side preview for file search, clipboard history, color picker,
+  // emoji picker, calculator/units and reminder/event intent rows. Only
+  // previewable selections expand the card; everything else keeps the
+  // single-column width. File bodies/snippets come from the bounded
+  // `file-preview` helper op with a single-entry cache (never a map — this
+  // process is keepLoaded). Clipboard stays title-only by design.
+  property string previewKindStr: ""
+  property string previewForPath: ""
+  property var previewInfo: null
+  readonly property bool showPreview: !root.dmenuActive && root.previewKindStr !== ""
+  readonly property int previewWidth: Style.space(360)
+  readonly property int wideCardWidth: Style.space(1120)
+  readonly property int baseCardWidth: Style.space(750)
+
+  function previewKindFor(r) {
+    if (!r || !r.key) return ""
+    var key = String(r.key)
+    var kind = String(r.kind || "")
+    if (kind === "file") return "file"
+    if (kind === "clipcopy") return "clipboard"
+    if (kind === "reminder" && key.indexOf("reminder.create") === 0) return "reminder"
+    if (kind === "event") return "event"
+    if (key === "calc") return "calc"
+    if (key === "unit") return "unit"
+    if (key.indexOf("color:") === 0) return "color"
+    if (key.indexOf("emoji:") === 0) return "emoji"
+    return ""
+  }
+
+  function previewKindLabel() {
+    var k = root.previewKindStr
+    if (k === "file") return "File"
+    if (k === "clipboard") return "Clipboard"
+    if (k === "color") return "Color"
+    if (k === "emoji") return "Emoji"
+    if (k === "calc") return "Calculator"
+    if (k === "unit") return "Conversion"
+    if (k === "reminder") return "Reminder"
+    if (k === "event") return "Calendar"
+    return ""
+  }
+
+  function formatPreviewBytes(n) {
+    var v = Number(n)
+    if (!isFinite(v) || v < 0) return ""
+    if (v < 1024) return v + " B"
+    if (v < 1024 * 1024) return (Math.round(v / 102.4) / 10) + " KB"
+    if (v < 1024 * 1024 * 1024) return (Math.round(v / 104857.6) / 10) + " MB"
+    return (Math.round(v / 107374182.4) / 10) + " GB"
+  }
+
+  function formatPreviewMtime(epoch) {
+    var t = Number(epoch)
+    if (!isFinite(t) || t <= 0) return ""
+    try {
+      var d = new Date(t * 1000)
+      return Qt.formatDateTime(d, "yyyy-MM-dd hh:mm")
+    } catch (e) {
+      return ""
+    }
+  }
+
+  function updatePreview() {
+    var r = root.selectedRow()
+    var k = root.previewKindFor(r)
+    if (k !== root.previewKindStr) root.previewKindStr = k
+    if (k === "file" && r && r.payload && r.payload.path) {
+      root.requestFilePreview(String(r.payload.path))
+    } else {
+      previewDebounce.stop()
+      if (k !== "file") {
+        root.previewForPath = ""
+        root.previewInfo = null
+      }
+    }
+  }
+
+  function requestFilePreview(path) {
+    if (!path || path.length > root.maxTitleChars + 512) return
+    if (root.previewForPath === path && root.previewInfo) return
+    previewDebounce.forPath = path
+    previewDebounce.restart()
+  }
+
+  function loadFilePreview(raw, forPath) {
+    var sel = root.selectedRow()
+    if (!sel || sel.kind !== "file" || !sel.payload || sel.payload.path !== forPath) return
+    var reply = root.helperReply(raw)
+    var info = (reply && reply.preview && typeof reply.preview === "object") ? reply.preview : null
+    if (!info) info = { path: forPath, unavailable: true }
+    root.previewInfo = info
+    root.previewForPath = forPath
+  }
+
   // ------------------------------------------------------------- theme
   // Shares the [menu] surface tokens, so any theme that styles the Omarchy
   // menu styles this too. The card is deliberately translucent: the frost is
@@ -319,6 +414,9 @@ Item {
     root.suggestionFor = ""
     root.fileRows = []
     root.fileFor = ""
+    root.previewKindStr = ""
+    root.previewForPath = ""
+    root.previewInfo = null
     // The panel appears under wherever the pointer already is. Hold the cursor
     // for the same beat a keystroke would, so opening over a row does not hand
     // it the selection before the first character is typed.
@@ -404,6 +502,9 @@ Item {
     root.fileRows = []
     root.fileFor = ""
     root.clipboardRows = []
+    root.previewKindStr = ""
+    root.previewForPath = ""
+    root.previewInfo = null
     typingGuard.restart()
     root.rebuild()
     pointerGate.reset()
@@ -439,12 +540,17 @@ Item {
     suggestDebounce.stop()
     fileDebounce.stop()
     clipboardDebounce.stop()
+    previewDebounce.stop()
     suggestProc.running = false
     fileProc.running = false
     clipboardProc.running = false
+    previewProc.running = false
     emojiProc.running = false
     hotkeysProc.running = false
     root.clipboardRows = []
+    root.previewKindStr = ""
+    root.previewForPath = ""
+    root.previewInfo = null
   }
 
   function refreshSettings() {
@@ -717,7 +823,12 @@ Item {
         title: calc.text, subtitle: q.replace(/^=/, "").trim(),
         accessory: "Copy", icon: "󰃬", mono: true,
         primaryLabel: "Copy result",
-        payload: { text: calc.text.replace(/\s/g, "") }
+        payload: {
+          text: calc.text.replace(/\s/g, ""),
+          expr: q.replace(/^=/, "").trim(),
+          value: calc.value,
+          display: calc.text
+        }
       }))
     }
 
@@ -728,7 +839,13 @@ Item {
         title: unit.text, subtitle: unit.detail,
         accessory: unit.family, icon: "󰑤", mono: true,
         primaryLabel: "Copy result",
-        payload: { text: unit.text.replace(/\s/g, "") }
+        payload: {
+          text: unit.text.replace(/\s/g, ""),
+          detail: unit.detail,
+          family: unit.family,
+          value: unit.value,
+          display: unit.text
+        }
       }))
     }
 
@@ -740,7 +857,12 @@ Item {
         subtitle: "Notify " + reminder.label + " · in " + NaturalTime.formatDuration(reminder.minutes),
         accessory: "Reminder", icon: "󰢌",
         primaryLabel: "Set reminder",
-        payload: { minutes: reminder.minutes, message: reminder.message }
+        payload: {
+          minutes: reminder.minutes,
+          message: reminder.message,
+          label: reminder.label,
+          query: q
+        }
       }))
     } else if (reminder && reminder.needsTime) {
       out.push(root.row({
@@ -764,7 +886,10 @@ Item {
         payload: {
           title: event.title,
           start: NaturalTime.toUtcBasic(event.start),
-          end: NaturalTime.toUtcBasic(event.end)
+          end: NaturalTime.toUtcBasic(event.end),
+          label: event.label,
+          durationMinutes: event.durationMinutes,
+          query: q
         }
       }))
     }
@@ -1011,7 +1136,12 @@ Item {
           title: v.text, subtitle: v.label,
           accessory: "Color", icon: "●", mono: true,
           primaryLabel: "Copy color",
-          payload: { text: v.text }
+          payload: {
+            text: v.text,
+            label: v.label,
+            swatch: parsed.swatch,
+            values: parsed.values
+          }
         }))
       }
     }
@@ -1270,7 +1400,11 @@ Item {
         title: ranked[i].title, subtitle: "",
         accessory: "Copy", icon: "󰅌", mono: true,
         primaryLabel: "Copy to clipboard",
-        payload: { index: ranked[i].index, title: ranked[i].title }
+        payload: {
+          index: ranked[i].index,
+          title: ranked[i].title,
+          bytes: ranked[i].bytes || 0
+        }
       }))
     }
     return out
@@ -1307,7 +1441,12 @@ Item {
         title: Emoji.title(s.k), subtitle: "",
         accessory: "Copy", icon: s.e,
         primaryLabel: "Copy emoji",
-        payload: { text: s.e }
+        payload: {
+          text: s.e,
+          keywords: s.k,
+          glyphIndex: s.index,
+          title: Emoji.title(s.k)
+        }
       }))
     }
     return out
@@ -1421,7 +1560,12 @@ Item {
         icon: f.isDir ? "󰉋" : "󰈔",
         primaryLabel: "Open",
         secondaryLabel: "Open folder",
-        payload: { path: f.path, dir: f.dir }
+        payload: {
+          path: f.path,
+          dir: f.dir,
+          name: f.name,
+          isDir: f.isDir === true
+        }
       }))
     }
     return out
@@ -1566,6 +1710,7 @@ Item {
     root.selectedIndex = restored >= 0 ? restored : root.firstSelectableIndex()
     root.cursorActive = next.length > 0
     pointerGate.reset()
+    root.updatePreview()
     Qt.callLater(function() {
       if (displayModel.count > 0) resultList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
     })
@@ -1603,6 +1748,7 @@ Item {
     root.selectedIndex = index
     root.pinnedKey = root.selectedRowKey()
     root.armedKey = ""
+    root.updatePreview()
   }
 
   // Steps over "noop" rows (hints, reminder listings) so the cursor only ever
@@ -1620,6 +1766,7 @@ Item {
     root.cursorActive = true
     root.armedKey = ""
     pointerGate.reset()
+    root.updatePreview()
     resultList.positionViewAtIndex(index, ListView.Contain)
   }
 
@@ -1636,6 +1783,7 @@ Item {
     root.cursorActive = true
     root.armedKey = ""
     pointerGate.reset()
+    root.updatePreview()
     resultList.positionViewAtIndex(index, ListView.Contain)
   }
 
@@ -1916,7 +2064,11 @@ Item {
     for (var i = 0; i < list.length; i++) {
       var item = list[i]
       if (!item || typeof item.title !== "string" || !item.title) continue
-      out.push({ index: Util.clamp(item.index, 0, 1000), title: item.title })
+      out.push({
+        index: Util.clamp(item.index, 0, 1000),
+        title: item.title,
+        bytes: isFinite(item.bytes) ? Math.max(0, Math.min(8 * 1024 * 1024, item.bytes)) : 0
+      })
     }
     root.clipboardRows = out
     if (root.opened) root.rebuild()
@@ -2083,6 +2235,31 @@ Item {
     }
   }
 
+  Timer {
+    id: previewDebounce
+    interval: 120
+    property string forPath: ""
+    onTriggered: {
+      var path = previewDebounce.forPath
+      if (!path) return
+      // Single-entry cache: a repeat selection reuses previewInfo.
+      if (root.previewForPath === path && root.previewInfo) return
+      previewProc.running = false
+      previewProc.forPath = path
+      previewProc.command = root.helperArgv(["file-preview", path])
+      previewProc.running = true
+    }
+  }
+
+  Process {
+    id: previewProc
+    property string forPath: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadFilePreview(text, previewProc.forPath)
+    }
+  }
+
   Process { id: clipCopyProc }
 
   Process {
@@ -2190,6 +2367,7 @@ Item {
   Component.onDestruction: {
     root.stopQueryWork()
     clipCopyProc.running = false
+    previewProc.running = false
     remindersProc.running = false
     settingsProc.running = false
     settingsWriteProc.running = false
@@ -2257,10 +2435,13 @@ Item {
       readonly property bool hasResults: displayModel.count > 0
 
       // Picker callers size the card: width honors their --width inside
-      // the panel, and the list scrolls inside maxListHeight.
+      // the panel, and the list scrolls inside maxListHeight. Previewable
+      // selections widen to list + preview; everything else stays narrow.
       width: root.dmenuActive
         ? Math.min(Style.space(root.dmenuWidth), panel.width - Style.space(48))
-        : Math.min(Style.space(750), panel.width - Style.space(48))
+        : (root.showPreview
+          ? Math.min(root.wideCardWidth, panel.width - Style.space(48))
+          : Math.min(root.baseCardWidth, panel.width - Style.space(48)))
       height: root.searchHeight
         + (hasResults ? root.hairline + root.listPadding * 2 + listHeight : 0)
         + root.hairline + root.footerHeight
@@ -2279,6 +2460,9 @@ Item {
 
       Behavior on height {
         NumberAnimation { duration: 110; easing.type: Easing.OutCubic }
+      }
+      Behavior on width {
+        NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
       }
 
       // Swallow clicks so they don't reach the dismiss MouseArea behind.
@@ -2437,7 +2621,10 @@ Item {
       }
 
       // ------------------------------------------------------- results
+      // Single column by default; previewable selections split into
+      // list + right-side preview pane. The cursor stays list-only.
       Item {
+        id: resultsWrap
         anchors {
           top: searchDivider.bottom
           left: parent.left
@@ -2448,9 +2635,21 @@ Item {
         height: card.listHeight
         visible: card.hasResults
 
-        ListView {
-          id: resultList
+        Row {
+          id: resultsRow
           anchors.fill: parent
+          spacing: 0
+
+          Item {
+            id: listWrap
+            width: root.showPreview
+              ? Math.max(160, resultsWrap.width - root.previewWidth - root.hairline)
+              : resultsWrap.width
+            height: parent.height
+
+            ListView {
+              id: resultList
+              anchors.fill: parent
           model: displayModel
           clip: true
           boundsBehavior: Flickable.StopAtBounds
@@ -2615,7 +2814,474 @@ Item {
                 if (!resultRow.selectable) return
                 root.cursorActive = true
                 root.selectedIndex = resultRow.index
+                root.pinnedKey = root.selectedRowKey()
+                root.updatePreview()
                 root.activate(resultRow.index, (mouse.modifiers & Qt.ShiftModifier) ? true : false)
+              }
+            }
+          }
+            }
+          }
+
+          Rectangle {
+            id: previewDivider
+            visible: root.showPreview
+            width: root.hairline
+            height: parent.height
+            color: root.dividerColor
+          }
+
+          // ------------------------------------------------- preview pane
+          Item {
+            id: previewWrap
+            visible: root.showPreview
+            width: root.showPreview ? root.previewWidth : 0
+            height: parent.height
+            clip: true
+
+            Flickable {
+              id: previewFlick
+              anchors.fill: parent
+              anchors.leftMargin: root.listPadding
+              anchors.rightMargin: root.listPadding
+              anchors.topMargin: Style.space(4)
+              anchors.bottomMargin: Style.space(4)
+              contentHeight: previewCol.height
+              contentWidth: width
+              clip: true
+              boundsBehavior: Flickable.StopAtBounds
+
+              Column {
+                id: previewCol
+                width: previewFlick.width
+                spacing: Style.space(8)
+
+                Text {
+                  text: root.previewKindLabel()
+                  textFormat: Text.PlainText
+                  color: root.foreground
+                  opacity: 0.45
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.weight: Font.Medium
+                }
+
+                // ---------- file ----------
+                Column {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  visible: root.previewKindStr === "file"
+
+                  Item {
+                    width: parent.width
+                    height: Style.space(72)
+                    visible: root.previewKindStr === "file"
+
+                    // Image thumbnail when the helper says image; folder /
+                    // file glyph otherwise. file:// is safe here: the path
+                    // came from fd output the user already selected.
+                    Image {
+                      id: previewThumb
+                      visible: root.previewInfo && root.previewInfo.isImage === true
+                      source: (root.previewInfo && root.previewInfo.isImage === true
+                        && root.previewInfo.path) ? Util.fileUrl(root.previewInfo.path) : ""
+                      width: Style.space(56)
+                      height: Style.space(56)
+                      fillMode: Image.PreserveAspectFit
+                      asynchronous: true
+                      cache: false
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Text {
+                      visible: !(root.previewInfo && root.previewInfo.isImage === true)
+                      text: (root.selectedRow() && root.selectedRow().payload
+                        && root.selectedRow().payload.isDir) ? "󰉋" : "󰈔"
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      opacity: 0.85
+                      font.family: root.fontFamily
+                      font.pixelSize: 40
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Text {
+                      text: (root.selectedRow() && root.selectedRow().payload
+                        && root.selectedRow().payload.name) || ""
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.title
+                      font.weight: Font.Medium
+                      elide: Text.ElideRight
+                      wrapMode: Text.Wrap
+                      maximumLineCount: 2
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(66)
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                    }
+                  }
+
+                  Text {
+                    width: parent.width
+                    text: (root.selectedRow() && root.selectedRow().payload
+                      && root.selectedRow().payload.dir) || ""
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    elide: Text.ElideRight
+                  }
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.65
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    text: {
+                      var info = root.previewInfo
+                      if (!info) return "Loading…"
+                      if (info.unavailable) return "No preview available"
+                      if (info.isDir) {
+                        var c = Number(info.childCount || 0)
+                        var t = info.childTruncated ? "+" : ""
+                        return c + t + " entries · " + root.formatPreviewMtime(info.mtime)
+                      }
+                      var parts = []
+                      if (info.size !== undefined) parts.push(root.formatPreviewBytes(info.size))
+                      if (info.ext) parts.push(String(info.ext).toUpperCase())
+                      var mt = root.formatPreviewMtime(info.mtime)
+                      if (mt) parts.push(mt)
+                      if (info.kind === "binary") parts.push("Binary")
+                      return parts.join(" · ")
+                    }
+                  }
+                  Rectangle {
+                    width: parent.width
+                    height: previewSnippet.visible ? previewSnippet.height + Style.space(16) : 0
+                    visible: root.previewInfo && !root.previewInfo.isDir
+                      && !root.previewInfo.unavailable
+                      && root.previewInfo.isImage !== true
+                      && root.previewInfo.kind !== "binary"
+                      && root.previewInfo.snippet
+                    color: Util.alpha(root.foreground, 0.06)
+                    radius: root.rowRadius
+                    Text {
+                      id: previewSnippet
+                      anchors.fill: parent
+                      anchors.margins: Style.space(8)
+                      text: (root.previewInfo && root.previewInfo.snippet) || ""
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      opacity: 0.85
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      wrapMode: Text.Wrap
+                      maximumLineCount: 14
+                      elide: Text.ElideRight
+                    }
+                  }
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    text: {
+                      if (root.previewInfo && root.previewInfo.truncated) return "Truncated preview"
+                      if (root.previewInfo && root.previewInfo.isImage === true) return "Image thumbnail"
+                      return ""
+                    }
+                    visible: text.length > 0
+                  }
+                  Text {
+                    text: "↵ Open · ⇧↵ Open folder"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                // ---------- clipboard (title-only) ----------
+                Column {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  visible: root.previewKindStr === "clipboard"
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.title
+                    text: (root.selectedRow() && root.selectedRow().title) || ""
+                  }
+                  Text {
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.55
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    text: {
+                      var r = root.selectedRow()
+                      if (!r || !r.payload) return ""
+                      var idx = r.payload.index
+                      var b = root.formatPreviewBytes(r.payload.bytes || 0)
+                      return "Entry #" + idx + (b ? " · " + b : "")
+                    }
+                  }
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    text: "Full text stays on disk — Enter copies via the helper."
+                  }
+                  Text {
+                    text: "↵ Copy to clipboard"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                // ---------- color ----------
+                Column {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  visible: root.previewKindStr === "color"
+                  Rectangle {
+                    width: parent.width
+                    height: Style.space(72)
+                    radius: root.rowRadius
+                    border.width: root.hairline
+                    border.color: root.dividerColor
+                    color: {
+                      var r = root.selectedRow()
+                      var s = (r && r.payload && r.payload.swatch) || ""
+                      return s || "transparent"
+                    }
+                  }
+                  Repeater {
+                    model: {
+                      var r = root.selectedRow()
+                      if (r && r.payload && Array.isArray(r.payload.values)) return r.payload.values
+                      if (r) return [{ label: r.subtitle, text: r.title }]
+                      return []
+                    }
+                    delegate: Row {
+                      required property var modelData
+                      width: previewCol.width
+                      spacing: Style.space(8)
+                      Text {
+                        text: (modelData && modelData.label) || ""
+                        textFormat: Text.PlainText
+                        color: root.foreground
+                        opacity: 0.5
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        width: Style.space(44)
+                      }
+                      Text {
+                        text: (modelData && modelData.text) || ""
+                        textFormat: Text.PlainText
+                        color: root.foreground
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        elide: Text.ElideRight
+                        width: parent.width - Style.space(52)
+                      }
+                    }
+                  }
+                  Text {
+                    text: "↵ Copy color"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                // ---------- emoji ----------
+                Column {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  visible: root.previewKindStr === "emoji"
+                  Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText
+                    font.pixelSize: 56
+                    text: (root.selectedRow() && root.selectedRow().payload
+                      && root.selectedRow().payload.text) || ""
+                  }
+                  Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.title
+                    font.weight: Font.Medium
+                    wrapMode: Text.Wrap
+                    text: (root.selectedRow() && root.selectedRow().payload
+                      && root.selectedRow().payload.title) || ""
+                  }
+                  Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.55
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    text: (root.selectedRow() && root.selectedRow().payload
+                      && root.selectedRow().payload.keywords) || ""
+                  }
+                  Text {
+                    width: parent.width
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "↵ Copy emoji"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                // ---------- calculator / conversion ----------
+                Column {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  visible: root.previewKindStr === "calc" || root.previewKindStr === "unit"
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: 26
+                    font.weight: Font.Medium
+                    text: {
+                      var r = root.selectedRow()
+                      if (!r) return ""
+                      if (r.payload && r.payload.display) return String(r.payload.display)
+                      return String(r.title || "")
+                    }
+                  }
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.6
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    text: {
+                      var r = root.selectedRow()
+                      if (!r || !r.payload) return ""
+                      if (root.previewKindStr === "calc") return String(r.payload.expr || r.subtitle || "")
+                      return String(r.payload.detail || r.subtitle || "")
+                    }
+                  }
+                  Text {
+                    width: parent.width
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    visible: root.previewKindStr === "unit"
+                    text: {
+                      var r = root.selectedRow()
+                      if (r && r.payload && r.payload.family) return "Family · " + String(r.payload.family)
+                      return ""
+                    }
+                  }
+                  Text {
+                    text: "↵ Copy result"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                }
+
+                // ---------- reminder / event ----------
+                Column {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  visible: root.previewKindStr === "reminder" || root.previewKindStr === "event"
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.title
+                    font.weight: Font.Medium
+                    text: (root.selectedRow() && root.selectedRow().title) || ""
+                  }
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.6
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    text: (root.selectedRow() && root.selectedRow().subtitle) || ""
+                  }
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.5
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    text: {
+                      var r = root.selectedRow()
+                      if (!r || !r.payload) return ""
+                      if (root.previewKindStr === "reminder" && r.payload.label)
+                        return "Notify " + String(r.payload.label)
+                      if (root.previewKindStr === "event" && r.payload.label)
+                        return String(r.payload.label)
+                      return ""
+                    }
+                    visible: text.length > 0
+                  }
+                  Text {
+                    width: parent.width
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    text: root.previewKindStr === "event"
+                      ? "↵ Add to Google Calendar · ⇧↵ Save .ics"
+                      : "↵ Set reminder"
+                  }
+                }
               }
             }
           }

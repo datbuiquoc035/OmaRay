@@ -294,6 +294,56 @@ class HelperTests(unittest.TestCase):
             self.assertTrue(reply["ok"])
             self.assertEqual(reply["items"], [])
 
+    def test_file_preview_text_dir_image_and_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            text_file = base / "notes.txt"
+            text_file.write_text("hello preview\nsecond line\n")
+            sub = base / "sub"
+            sub.mkdir()
+            (sub / "a").write_text("x")
+            img = base / "pic.png"
+            img.write_bytes(b"\x89PNG" + b"x" * 100)
+            binary = base / "blob.bin"
+            binary.write_bytes(b"\x00\x01\x02abc")
+
+            def preview(path):
+                proc = subprocess.run(
+                    [str(HELPER_PATH), "file-preview", str(path)],
+                    capture_output=True, timeout=30)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                reply = json.loads(proc.stdout.decode())
+                self.assertTrue(reply["ok"])
+                return reply["preview"]
+
+            text = preview(text_file)
+            self.assertFalse(text["isDir"])
+            self.assertEqual(text["kind"], "text")
+            self.assertIn("hello preview", text["snippet"])
+            self.assertFalse(text["truncated"])
+
+            folder = preview(sub)
+            self.assertTrue(folder["isDir"])
+            self.assertEqual(folder["childCount"], 1)
+
+            image = preview(img)
+            self.assertTrue(image["isImage"])
+            self.assertEqual(image["kind"], "image")
+            self.assertEqual(image["snippet"], "")
+
+            blob = preview(binary)
+            self.assertEqual(blob["kind"], "binary")
+            self.assertTrue(blob["binary"])
+
+            missing = preview(base / "nope.txt")
+            self.assertTrue(missing.get("unavailable"))
+
+    def test_file_preview_rejects_relative_paths(self):
+        proc = subprocess.run(
+            [str(HELPER_PATH), "file-preview", "relative/path"],
+            capture_output=True, timeout=30)
+        self.assertFalse(json.loads(proc.stdout.decode())["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "datbuiquoc035.omaray",
   "name": "OmaRay",
-  "version": "0.1.0-dev",
+  "version": "0.2.0-dev",
   "author": "qdot",
   "license": "MIT",
   "description": "Spotlight-like Omarchy menu",

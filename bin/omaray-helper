@@ -65,6 +65,19 @@ FILES_COUNT = 40
 FILES_PATH_CHARS = 1024
 FILES_PATTERN_CHARS = 256
 
+PREVIEW_HEAD_BYTES = 8192
+PREVIEW_TEXT_CHARS = 2000
+PREVIEW_DIR_COUNT = 100
+PREVIEW_IMAGE_EXTS = frozenset([
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif",
+])
+PREVIEW_TEXT_EXTS = frozenset([
+    "txt", "md", "markdown", "log", "json", "jsonc", "toml", "yaml", "yml",
+    "js", "mjs", "cjs", "ts", "qml", "py", "sh", "bash", "css", "html",
+    "xml", "ini", "conf", "cfg", "env", "lua", "vim", "c", "h", "cpp",
+    "hpp", "rs", "go", "java", "rb", "pl", "nix", "desktop",
+])
+
 REMINDER_BYTES = 256 * 1024
 REMINDER_DEADLINE = 3.0
 REMINDER_COUNT = 50
@@ -1075,6 +1088,122 @@ def cmd_files(argv):
     emit({"files": rows})
 
 
+def _preview_ext(path):
+    base = path.rsplit("/", 1)[-1].lower()
+    if "." not in base:
+        return ""
+    return base.rsplit(".", 1)[-1][:16]
+
+
+def cmd_file_preview(argv):
+    """Bounded metadata + text head for the preview pane.
+
+    argv is [path]. Anything the user can read may be previewed — unlike the
+    owned-config reads, no ownership check applies — but the read itself is
+    still bounded: lstat first, at most PREVIEW_HEAD_BYTES from regular files,
+    directories counted (not listed) up to PREVIEW_DIR_COUNT. Symlinks are
+    followed by stat (the user picked the path from fd output); broken links,
+    sockets, FIFOs and unreadables degrade to {unavailable: True} rather than
+    failing the call.
+    """
+    if len(argv) != 1:
+        raise Denied("file-preview takes a path")
+    path = argv[0]
+    if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
+        raise Denied("bad preview path")
+    if len(path) > FILES_PATH_CHARS:
+        raise Denied("bad preview path")
+    name = path.rsplit("/", 1)[-1] or path
+    try:
+        st = os.stat(path)
+    except OSError:
+        emit({"preview": {"path": path[:FILES_PATH_CHARS],
+                          "name": name[:128], "unavailable": True}})
+        return
+    if stat.S_ISDIR(st.st_mode):
+        children = 0
+        truncated_dir = False
+        try:
+            with os.scandir(path) as it:
+                for _ in it:
+                    children += 1
+                    if children > PREVIEW_DIR_COUNT:
+                        truncated_dir = True
+                        break
+        except OSError:
+            emit({"preview": {"path": path[:FILES_PATH_CHARS],
+                              "name": name[:128], "unavailable": True}})
+            return
+        emit({"preview": {
+            "path": path[:FILES_PATH_CHARS],
+            "name": name[:128],
+            "isDir": True,
+            "size": int(st.st_size),
+            "mtime": int(st.st_mtime),
+            "childCount": children,
+            "childTruncated": truncated_dir,
+        }})
+        return
+    if not stat.S_ISREG(st.st_mode):
+        emit({"preview": {"path": path[:FILES_PATH_CHARS],
+                          "name": name[:128], "unavailable": True}})
+        return
+    size = int(st.st_size)
+    mtime = int(st.st_mtime)
+    ext = _preview_ext(path)
+    is_image = ext in PREVIEW_IMAGE_EXTS
+    kind = "image" if is_image else ("text" if ext in PREVIEW_TEXT_EXTS else "file")
+    snippet = ""
+    truncated = size > PREVIEW_HEAD_BYTES
+    binary = False
+    if not is_image and size > 0:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError:
+            emit({"preview": {"path": path[:FILES_PATH_CHARS],
+                              "name": name[:128], "unavailable": True}})
+            return
+        try:
+            fst = os.fstat(fd)
+            if not stat.S_ISREG(fst.st_mode):
+                emit({"preview": {"path": path[:FILES_PATH_CHARS],
+                                  "name": name[:128], "unavailable": True}})
+                return
+            os.set_blocking(fd, True)
+            head = os.read(fd, PREVIEW_HEAD_BYTES)
+        except OSError:
+            emit({"preview": {"path": path[:FILES_PATH_CHARS],
+                              "name": name[:128], "unavailable": True}})
+            return
+        finally:
+            os.close(fd)
+        if b"\x00" in head:
+            binary = True
+        else:
+            try:
+                text = head.decode("utf-8", "replace")
+            except ValueError:
+                binary = True
+            else:
+                snippet = clamp_text(text, PREVIEW_TEXT_CHARS)
+                truncated = size > len(head) or len(text) > PREVIEW_TEXT_CHARS
+        if binary:
+            kind = "binary"
+    emit({"preview": {
+        "path": path[:FILES_PATH_CHARS],
+        "name": name[:128],
+        "isDir": False,
+        "size": size,
+        "mtime": mtime,
+        "ext": ext,
+        "kind": kind,
+        "isImage": is_image,
+        "snippet": snippet,
+        "truncated": truncated,
+        "binary": binary,
+    }})
+
+
 def cmd_write_ics(argv):
     if len(argv) != 1 or not ICS_STAMP_RE.match(argv[0]):
         raise Denied("bad event stamp")
@@ -1132,6 +1261,7 @@ COMMANDS = {
     "reminders": (cmd_reminders, False),
     "suggest": (cmd_suggest, True),
     "files": (cmd_files, True),
+    "file-preview": (cmd_file_preview, True),
     "write-ics": (cmd_write_ics, True),
 }
 
