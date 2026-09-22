@@ -39,7 +39,7 @@ omarchy plugin remove datbuiquoc035.omaray
 omarchy restart shell
 ```
 
-## Search providers (typed query, in rebuild() order)
+## Search providers - Features
 
 When the query is non-empty, rows are assembled in this order.
 Each provider contributes zero or more rows; empty results are skipped.
