@@ -46,12 +46,15 @@ Each provider contributes zero or more rows; empty results are skipped.
 
 1. **Intent rows** — direct answers, sorted above search:
    - Calculator, e.g. `=2*(3+4)`, `20% of 250` (Enter copies result)
+     ![Calculator preview](previews/calculator.png)
    - Unit conversion, e.g. `10 km to miles`, `72f in c`
      ![Unit conversion preview](previews/conversion_compact.png)
      ![Unit conversion preview with detail pane](previews/conversion_full.png)
    - Reminder, e.g. `remind me in 20m to call mom` (or a "needs a time" hint)
      ![Reminder preview](previews/reminder.png)
-   - Calendar event, e.g. `meeting tomorrow at 9 for 1h`
+   - Calendar event, e.g. `meeting tomorrow at 9 for 1h`,
+     `meeting 25-12-2026 at 18:00` (dd-mm-yyyy also works)
+     ![Calendar event preview](previews/meetings.png)
    - URL, e.g. `example.com` (Enter opens in browser)
 2. **Category search** — e.g. `app` offers the Apps category before any hotkey.
 3. **Learn** — `docs` offers the Keybinds browser row.
@@ -66,17 +69,24 @@ Each provider contributes zero or more rows; empty results are skipped.
 7. **Reminders list** — `reminders` shows active reminders plus a clear-all row.
    ![Reminders list preview](previews/reminders.png)
 8. **Applications** — frecency-ranked apps, `maxApps` per query.
+   ![Application fuzzy search preview](previews/app_fuzzy_1.png)
+   ![Application fuzzy search preview](previews/app_fuzzy_2.png)
 9. **Open windows** — `slack` finds matching windows. Enter focuses,
    Shift+Enter closes.
 10. **Emoji** — `:smile` searches the emoji catalogue. Enter copies the glyph.
+   ![Emoji search preview](previews/emoji_search_1.png)
+   ![Emoji search preview](previews/emoji_search_2.png)
 11. **Bangs** — `gh quickshell` searches GitHub for `quickshell`.
     Ranked below apps on purpose, so `docker desktop` still launches Docker.
+   ![Bang search preview](previews/gh_search.png)
 12. **Commands + Quicklinks** — fuzzy Omarchy commands and named link
     destinations (up to 7 rows).
+   ![Commands preview](previews/commands.png)
 13. **Stock menu search** — global search over the Install/Remove/setup tree
     (up to 7 rows). Leaves run, submenus drill in.
 14. **Hotkeys** — Super+K binds by what they do or their combo
     (up to 7 rows). Runnable binds run; keyboard-only ones show greyed.
+   ![Hotkey search preview](previews/keybind_search.png)
 15. **Files** — `f invoice`, `~/doc`, `/etc/…` via `fd`
     (up to 10 rows shown). Enter opens, Shift+Enter opens the folder.
     ![File search preview](previews/file_search.png)
