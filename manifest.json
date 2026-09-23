@@ -21,7 +21,7 @@
   "barWidget": {
     "displayName": "OmaRay",
     "description": "Opens the OmaRay main menu",
-    "category": "Compositor",
+    "category": "Desktop",
     "allowMultiple": false,
     "defaultSection": "left"
   },
