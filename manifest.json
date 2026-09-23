@@ -8,12 +8,12 @@
   "description": "Spotlight-like Omarchy menu",
   "homepage": "https://github.com/datbuiquoc035/OmaRay",
   "kinds": [
-    "overlay",
+    "menu",
     "bar-widget"
   ],
   "keepLoaded": true,
   "entryPoints": {
-    "overlay": "OmaRay.qml",
+    "menu": "OmaRay.qml",
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
