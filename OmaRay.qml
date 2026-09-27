@@ -852,6 +852,12 @@ Item {
       }))
     }
 
+    // Date maths sits with the other direct answers, between the conversion
+    // and the reminder: a count or a resolved date, before anything that
+    // merely matches the words.
+    var dateMath = root.dateMathRows(q)
+    for (var d = 0; d < dateMath.length; d++) out.push(dateMath[d])
+
     var reminder = NaturalTime.parseReminder(q)
     if (reminder && !reminder.needsTime && reminder.message) {
       out.push(root.row({
@@ -908,6 +914,35 @@ Item {
       }))
     }
 
+    return out
+  }
+
+  // Date maths: "days until dec 25", "today + 90 days", "friday", "now",
+  // "1790000000". One row per copyable form of the answer — the count, the
+  // date, unix time, ISO — so Enter always puts something useful on the
+  // clipboard, whichever row the cursor is on. The parser only answers a query
+  // that is nothing but a date question, so nothing here can take the cursor
+  // off an app or a command the query was aimed at.
+  function dateMathRows(q) {
+    var answer = NaturalTime.parseDateMath(q, new Date())
+    if (!answer || !Array.isArray(answer.values)) return []
+    var out = []
+    for (var i = 0; i < answer.values.length; i++) {
+      var v = answer.values[i]
+      out.push(root.row({
+        key: "date." + answer.kind + ":" + i, section: "Date maths", kind: "copy",
+        title: v.text, subtitle: answer.subtitle,
+        accessory: v.label, icon: "󰸗", mono: v.mono === true,
+        primaryLabel: "Copy result",
+        payload: {
+          text: v.text,
+          label: v.label,
+          display: v.text,
+          form: answer.kind,
+          query: String(q || "")
+        }
+      }))
+    }
     return out
   }
 
@@ -2136,6 +2171,7 @@ Item {
     var wantSuggestions = root.settings.webSuggestions && q.length >= 2
       && !Web.detectUrl(q) && !Web.bang(q) && !Calc.evaluate(q)
       && !NaturalTime.isReminderQuery(q) && !NaturalTime.isEventQuery(q)
+      && !NaturalTime.isDateQuery(q)
       && !root.clipboardQuery(q) && !root.fileSearchTarget(q)
       && q.charAt(0) !== ":" && q.charAt(0) !== "#"
       && !/^settings?(\s|$)/i.test(q) && Colors.parse(q) === null

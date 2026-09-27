@@ -50,6 +50,16 @@ Each provider contributes zero or more rows; empty results are skipped.
    - Unit conversion, e.g. `10 km to miles`, `72f in c`
      ![Unit conversion preview](previews/conversion_compact.png)
      ![Unit conversion preview with detail pane](previews/conversion_full.png)
+   - Date maths, e.g. `days until dec 25`, `today + 90 days`, `friday`,
+     `now`, `1790000000` (Enter copies result — the answer, its date,
+     its unix time and its ISO form each get a row). Also `months until`
+     and `years until`, `dec 25 - today`, bare `+90 days` / `-2 weeks`,
+     bare month names (`months until december`), and explicit years
+     (`months until 20 December 2027`)
+     ![Date maths preview for now](previews/date_calc_now.png)
+     ![Date maths preview for days until](previews/date_calc_date.png)
+     ![Date maths preview for months until](previews/date_calc_month.png)
+     ![Date maths preview for years until](previews/date_calc_year.png)
    - Reminder, e.g. `remind me in 20m to call mom` (or a "needs a time" hint)
      ![Reminder preview](previews/reminder.png)
    - Calendar event, e.g. `meeting tomorrow at 9 for 1h`,
