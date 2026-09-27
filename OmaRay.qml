@@ -344,6 +344,7 @@ Item {
     var routeArgv = null
     var routeApps = false
     var routeSystem = false
+    var routeScope = ""
     var routeQuery = ""
     try {
       var rawPayload = String(payloadJson || "{}")
@@ -365,11 +366,13 @@ Item {
       }
       else if (resolved && resolved.kind === "apps") routeApps = true
       else if (resolved && resolved.kind === "system") routeSystem = true
+      else if (resolved && resolved.kind === "scope") routeScope = String(resolved.scope || "")
     } catch (e) {
       initial = ""
       routeArgv = null
       routeApps = false
       routeSystem = false
+      routeScope = ""
       routeQuery = ""
     }
 
@@ -390,9 +393,9 @@ Item {
     // Every summon starts from a clean view. menuScope must reset here:
     // rebuild() prefers it over systemExpanded/appsExpanded/categories,
     // so a stale scope (e.g. Install) would shadow the next Super+Space,
-    // Super+Esc or Super+Alt+Space summon. Routes never returns a scope,
-    // so unconditional "" is correct.
-    root.menuScope = ""
+    // Super+Esc or Super+Alt+Space summon. A route may name one of its
+    // own, so the reset is the route's scope rather than an unconditional "".
+    root.menuScope = routeScope
     // The Apps category: the full frecency app list instead of the
     // categories front page. Reset on every open.
     root.appsExpanded = routeApps

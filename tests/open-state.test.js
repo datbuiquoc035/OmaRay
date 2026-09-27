@@ -27,7 +27,8 @@ function idleView(state) {
 }
 
 // Mirrors the fixed open(): every summon resets the view state, then applies
-// the route. Routes never returns a scope, so menuScope is always "".
+// the route. A scope route is the one kind that carries a scope, so menuScope
+// is that scope rather than always "".
 function nextOpenState(payloadJson) {
   const payload = JSON.parse(payloadJson || "{}")
   const route = payload.initialMenu || payload.menu || ""
@@ -36,13 +37,15 @@ function nextOpenState(payloadJson) {
   let routeQuery = ""
   let routeApps = false
   let routeSystem = false
+  let routeScope = ""
   if (resolved && resolved.kind === "query" && !initial) {
     initial = resolved.query
     routeQuery = resolved.query
   } else if (resolved && resolved.kind === "apps") routeApps = true
   else if (resolved && resolved.kind === "system") routeSystem = true
+  else if (resolved && resolved.kind === "scope") routeScope = String(resolved.scope || "")
   return {
-    menuScope: "",
+    menuScope: routeScope,
     appsExpanded: routeApps,
     systemExpanded: routeSystem,
     primedQuery: routeQuery,
@@ -93,4 +96,13 @@ test("summon after browsing Install shows the summoned view", () => {
 test("query-primed routes still prime after the reset", () => {
   assert.deepEqual(nextOpenState('{"menu":"capture"}').query, "screenshot")
   assert.deepEqual(nextOpenState('{"menu":"toggle"}').query, "toggle")
+})
+
+test("scope routes open their subtree, and do not leak into the next summon", () => {
+  assert.equal(idleView(nextOpenState('{"menu":"hardware"}')), "scope:trigger.hardware")
+  assert.equal(idleView(nextOpenState('{"menu":"hw"}')), "scope:trigger.hardware")
+  assert.equal(idleView(nextOpenState('{"menu":"share"}')), "scope:trigger.share")
+  // The Hardware view must not shadow the next summon, same as Install.
+  assert.equal(idleView(nextOpenState('{"menu":"root"}')), "categories")
+  assert.equal(idleView(nextOpenState('{"menu":"system"}')), "system")
 })
