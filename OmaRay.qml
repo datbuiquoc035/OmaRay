@@ -760,6 +760,22 @@ Item {
     settingsWriteProc.stdinEnabled = false
   }
 
+  // A `copy` row's text is user data, and the helper is the only crossing that
+  // can keep it off argv: /proc/<pid>/cmdline is readable by any local user on
+  // a system not mounted with hidepid, so a result left there is readable for
+  // as long as the process lives. Fire-and-forget for the same reason
+  // dmenuFinishProc is — dismiss() has already run, and stopQueryWork must not
+  // tear this one down mid-write or the copy is silently lost.
+  function copyText(text) {
+    if (!text) return
+    copyProc.running = false
+    copyProc.stdinEnabled = true
+    copyProc.command = root.helperArgv(["copy-text"])
+    copyProc.running = true
+    copyProc.write(text)
+    copyProc.stdinEnabled = false
+  }
+
   // Enter toggles a boolean or steps an enum/number forward, Shift+Enter
   // steps backward. The panel stays open so the new value is visible.
   function applySetting(key, direction) {
@@ -1888,8 +1904,10 @@ Item {
     case "copy":
       root.bumpUsage(r.key)
       root.dismiss()
-      // wl-copy over argv, never a shell string: the text is user data.
-      Util.execArgv(["wl-copy", "--", String(r.payload.text || "")])
+      // Over stdin, never argv: /proc/<pid>/cmdline is world-readable on any
+      // system not mounted with hidepid, so the text of the result would sit in
+      // the process arguments in the clear for anyone to poll ps for.
+      root.copyText(String(r.payload.text || ""))
       break
 
     case "clipcopy":
@@ -1898,10 +1916,16 @@ Item {
       // rather than what to copy. It re-reads the history under the same
       // bounds, re-identifies the row by the title the user actually saw — the
       // list may have shifted since — and pipes it to wl-copy itself.
+      //
+      // The index alone is an argv operand; the title is a clipboard prefix, so
+      // for a short entry it is the secret itself and goes in on stdin.
       clipCopyProc.running = false
+      clipCopyProc.stdinEnabled = true
       clipCopyProc.command = root.helperArgv([
-        "clipboard-copy", String(r.payload.index), String(r.payload.title || "")])
+        "clipboard-copy", String(r.payload.index)])
       clipCopyProc.running = true
+      clipCopyProc.write(String(r.payload.title || ""))
+      clipCopyProc.stdinEnabled = false
       break
 
     case "reminder":
@@ -2301,6 +2325,8 @@ Item {
 
   Process { id: clipCopyProc }
 
+  Process { id: copyProc }
+
   Process {
     id: remindersProc
     stdout: StdioCollector {
@@ -2406,6 +2432,7 @@ Item {
   Component.onDestruction: {
     root.stopQueryWork()
     clipCopyProc.running = false
+    copyProc.running = false
     previewProc.running = false
     remindersProc.running = false
     settingsProc.running = false

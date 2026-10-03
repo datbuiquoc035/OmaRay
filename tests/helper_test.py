@@ -294,6 +294,157 @@ class HelperTests(unittest.TestCase):
             self.assertTrue(reply["ok"])
             self.assertEqual(reply["items"], [])
 
+    def _wl_copy_stub(self, directory):
+        """A wl-copy that records what it was handed and what was visible in argv.
+
+        Returning a path with `wl-copy` in it makes the helper spawn this
+        instead of the real one. The stub runs while the helper is still alive
+        and blocked on it, which is the one moment where /proc/<pid>/cmdline
+        for the helper is on screen to any other local user.
+        """
+        bin_dir = Path(directory) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        stub = bin_dir / "wl-copy"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "def cmdline(pid):\n"
+            "    raw = open('/proc/%s/cmdline' % pid, 'rb').read()\n"
+            "    return [a.decode('utf-8', 'replace') for a in raw.split(b'\\x00')[:-1]]\n"
+            "stdin = sys.stdin.buffer.read()\n"
+            "record = {\n"
+            "    'argv': sys.argv[1:],\n"
+            "    'self_cmdline': cmdline('self'),\n"
+            "    'parent_cmdline': cmdline(os.getppid()),\n"
+            "    'stdin': stdin.decode('utf-8', 'replace'),\n"
+            "    'saw_in_any_cmdline': False,\n"
+            "}\n"
+            "for entry in os.listdir('/proc'):\n"
+            "    if not entry.isdigit():\n"
+            "        continue\n"
+            "    try:\n"
+            "        raw = open('/proc/%s/cmdline' % entry, 'rb').read()\n"
+            "    except OSError:\n"
+            "        continue\n"
+            "    if stdin and stdin in raw:\n"
+            "        record['saw_in_any_cmdline'] = True\n"
+            "open(os.environ['WL_COPY_RECORD'], 'w').write(json.dumps(record))\n")
+        stub.chmod(0o755)
+        return bin_dir
+
+    def _run_copy(self, home, argv, stdin, record):
+        """Run a helper command with a stubbed wl-copy; return its reply.
+
+        Returns (reply, record). `stdin` is what the caller sends on the pipe,
+        which for both commands is the text that must never reach argv.
+        """
+        with tempfile.TemporaryDirectory() as sandbox:
+            bin_dir = self._wl_copy_stub(sandbox)
+            env = dict(os.environ, HOME=home, PATH="%s:%s" % (bin_dir, os.environ["PATH"]),
+                       WL_COPY_RECORD=record)
+            proc = subprocess.run(
+                [str(HELPER_PATH)] + argv, input=stdin.encode("utf-8"),
+                capture_output=True, env=env, timeout=30)
+            reply = json.loads(proc.stdout.decode())
+        path = Path(record)
+        return reply, (json.loads(path.read_text()) if path.stat().st_size else None)
+
+    def test_clipboard_copy_takes_the_title_on_stdin_not_argv(self):
+        # The reported leak: `title` is the first CLIP_TITLE_CHARS of the real
+        # clipboard text, so for an entry this short it is the secret verbatim.
+        # argv is world-readable through /proc/<pid>/cmdline wherever /proc is
+        # mounted without hidepid, which is the default almost everywhere.
+        secret = "pw-4f2a-9c"
+        with tempfile.TemporaryDirectory() as home:
+            state = Path(home) / ".local" / "state" / "omarchy"
+            state.mkdir(parents=True)
+            (state / "clipboard-history.json").write_text(
+                json.dumps([{"type": "text", "text": secret}]))
+            with tempfile.NamedTemporaryFile(suffix=".json") as record:
+                reply, seen = self._run_copy(
+                    home, ["clipboard-copy", "0"], secret, record.name)
+                self.assertTrue(reply["ok"], reply)
+
+            # The secret reached wl-copy, so the copy did happen...
+            self.assertEqual(seen["stdin"], secret)
+            # ...entirely over the pipe, and nowhere in any process arguments.
+            self.assertFalse(seen["saw_in_any_cmdline"],
+                             "clipboard text leaked into a /proc cmdline")
+            self.assertNotIn(secret, " ".join(seen["parent_cmdline"]))
+            # argv[0] is however the shebang resolved the interpreter, so the
+            # assertion is on the operands: the index, and nothing else.
+            self.assertTrue(seen["parent_cmdline"][0].endswith("python3"))
+            self.assertEqual(seen["parent_cmdline"][1:],
+                             [str(HELPER_PATH), "clipboard-copy", "0"])
+            # wl-copy itself is handed the text on stdin, never as an operand. Its own
+            # argv is the interpreter plus the script and nothing else.
+            self.assertEqual(seen["argv"], [])
+            self.assertEqual(len(seen["self_cmdline"]), 2)
+            self.assertTrue(seen["self_cmdline"][1].endswith("/wl-copy"))
+
+    def test_clipboard_copy_still_rejects_a_title_that_no_longer_matches(self):
+        # Re-identification is the whole reason the title exists at all: the
+        # history can shift between the row being drawn and Enter.
+        with tempfile.TemporaryDirectory() as home:
+            state = Path(home) / ".local" / "state" / "omarchy"
+            state.mkdir(parents=True)
+            (state / "clipboard-history.json").write_text(
+                json.dumps([{"type": "text", "text": "current entry"}]))
+            with tempfile.NamedTemporaryFile(suffix=".json") as record:
+                reply, _ = self._run_copy(home, ["clipboard-copy", "0"],
+                                          "stale entry", record.name)
+            self.assertFalse(reply["ok"])
+            self.assertEqual(reply["error"], "clipboard entry changed")
+
+    def test_clipboard_copy_rejects_an_oversized_title(self):
+        with tempfile.TemporaryDirectory() as home:
+            state = Path(home) / ".local" / "state" / "omarchy"
+            state.mkdir(parents=True)
+            (state / "clipboard-history.json").write_text(
+                json.dumps([{"type": "text", "text": "x" * 4000}]))
+            with tempfile.NamedTemporaryFile(suffix=".json") as record:
+                reply, _ = self._run_copy(home, ["clipboard-copy", "0"],
+                                          "x" * 4000, record.name)
+            self.assertFalse(reply["ok"])
+            self.assertIn("stdin exceeded", reply["error"])
+
+    def test_copy_text_takes_the_text_on_stdin_not_argv(self):
+        # Calculator, unit, date, colour and emoji rows all land here. The
+        # values are derived rather than raw copied secrets, but they are still
+        # user data crossing a channel any local user can read off /proc.
+        # An emoji is one of the real payloads and cannot collide with an
+        # unrelated process during the /proc sweep.
+        text = "\U0001d11e"
+        with tempfile.TemporaryDirectory() as home:
+            with tempfile.NamedTemporaryFile(suffix=".json") as record:
+                reply, seen = self._run_copy(home, ["copy-text"], text, record.name)
+                self.assertTrue(reply["ok"], reply)
+                self.assertEqual(reply["copied"], len(text.encode("utf-8")))
+            self.assertEqual(seen["stdin"], text)
+            self.assertFalse(seen["saw_in_any_cmdline"],
+                             "copy text leaked into a /proc cmdline")
+            self.assertTrue(seen["parent_cmdline"][0].endswith("python3"))
+            self.assertEqual(seen["parent_cmdline"][1:],
+                             [str(HELPER_PATH), "copy-text"])
+
+    def test_copy_text_refuses_empty_and_nul(self):
+        with tempfile.TemporaryDirectory() as home:
+            with tempfile.NamedTemporaryFile(suffix=".json") as record:
+                reply, _ = self._run_copy(home, ["copy-text"], "", record.name)
+                self.assertFalse(reply["ok"])
+                reply, _ = self._run_copy(home, ["copy-text"], "a\x00b", record.name)
+                self.assertFalse(reply["ok"])
+                self.assertEqual(reply["error"], "text contains NUL")
+
+    def test_clip_title_flattens_caps_and_truncates(self):
+        self.assertEqual(HELPER._clip_title("  a\tb\n c  "), "a b c")
+        self.assertEqual(HELPER._clip_title("   "), "")
+        long = "x" * (HELPER.CLIP_TITLE_CHARS + 50)
+        self.assertEqual(HELPER._clip_title(long), "x" * HELPER.CLIP_TITLE_CHARS + "…")
+        # A capped title always fits the stdin allowance, at worst 4 bytes/char.
+        self.assertLessEqual(len(HELPER._clip_title(long).encode("utf-8")),
+                             HELPER.CLIP_TITLE_BYTES)
+
     def test_file_preview_text_dir_image_and_missing(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

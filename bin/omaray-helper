@@ -52,6 +52,14 @@ USAGE_KEY_RE = re.compile(r"^(?:app:|cmd:|bang\.|win:|emoji:|hotkey:)[^\x00-\x1f
 CLIP_ENTRIES = 200
 CLIP_TITLE_CHARS = 120
 CLIP_TEXT_BYTES = 1024 * 1024
+# The title is a clipboard prefix, so it arrives over stdin and is compared as
+# bytes. 120 chars plus the ellipsis is under 484 bytes even at 4 bytes a char;
+# this cap only exists to refuse a garbage pipe early.
+CLIP_TITLE_BYTES = 1024
+
+# What a `copy` row puts on the clipboard: calculator, unit, date, colour and
+# emoji output. Bounded far above any real row and passed to wl-copy on stdin.
+COPY_TEXT_BYTES = 64 * 1024
 
 SUGGEST_BYTES = 64 * 1024
 SUGGEST_DEADLINE = 3.0
@@ -940,6 +948,12 @@ def _clipboard_entries():
     return out
 
 
+def _clip_title(text):
+    """The row label for a history entry: flattened, capped, ellipsised."""
+    flat = re.sub(r"\s+", " ", text).strip()
+    return flat[:CLIP_TITLE_CHARS] + ("…" if len(flat) > CLIP_TITLE_CHARS else "")
+
+
 def cmd_read_clipboard():
     """Titles only.
 
@@ -951,20 +965,47 @@ def cmd_read_clipboard():
     entries = _clipboard_entries()
     rows = []
     for index, text in enumerate(entries):
-        flat = re.sub(r"\s+", " ", text).strip()
-        if not flat:
+        title = _clip_title(text)
+        if not title:
             continue
-        title = flat[:CLIP_TITLE_CHARS] + ("…" if len(flat) > CLIP_TITLE_CHARS else "")
         rows.append({"index": index, "title": title, "bytes": len(text.encode("utf-8"))})
     emit({"items": rows})
 
 
+def _wl_copy(payload):
+    """Hand `payload` to wl-copy and report how many bytes were accepted.
+
+    Not run_bounded: wl-copy forks a daemon that has to outlive this call in
+    order to serve the selection, and tearing down the process group would
+    take that daemon with it. A plain bounded wait on the parent is right
+    here — the input is a fixed size and the argv has no operands at all.
+    """
+    try:
+        subprocess.run(["wl-copy"], input=payload, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Denied("wl-copy failed: %s" % type(exc).__name())
+    return len(payload)
+
+
 def cmd_clipboard_copy(argv):
-    if len(argv) != 2:
-        raise Denied("clipboard-copy takes an index and a title")
+    """argv is the index alone. The title the user clicked arrives on stdin.
+
+    The title is the first 120 characters of whatever was copied, so it is the
+    text of the secret itself whenever the entry is short — which is exactly
+    the case worth protecting. argv is world-readable through /proc/<pid>/
+    cmdline on every system not mounted with hidepid, so anything derived from
+    clipboard content crosses here over stdin and never in the process
+    arguments. Comparing the raw bytes also avoids a decode/re-encode round
+    trip: a title the pipe mangled fails closed rather than copying a row the
+    user never saw.
+    """
+    if len(argv) != 1:
+        raise Denied("clipboard-copy takes an index")
     index = clamp_int(argv[0], 0, CLIP_ENTRIES - 1, -1)
     if index < 0:
         raise Denied("bad clipboard index")
+    claimed = read_stdin(CLIP_TITLE_BYTES)
     entries = _clipboard_entries()
     if index >= len(entries):
         raise Denied("clipboard entry is gone")
@@ -972,21 +1013,23 @@ def cmd_clipboard_copy(argv):
     # The history may have shifted between listing and activation, so the row
     # the user actually saw is re-identified by its title before anything is
     # put on the clipboard.
-    flat = re.sub(r"\s+", " ", text).strip()
-    expected = flat[:CLIP_TITLE_CHARS] + ("…" if len(flat) > CLIP_TITLE_CHARS else "")
-    if expected != argv[1]:
+    if _clip_title(text).encode("utf-8") != claimed:
         raise Denied("clipboard entry changed")
-    payload = text.encode("utf-8")[:CLIP_TEXT_BYTES]
-    # Not run_bounded: wl-copy forks a daemon that has to outlive this call in
-    # order to serve the selection, and tearing down the process group would
-    # take that daemon with it. A plain bounded wait on the parent is right
-    # here — the input is a fixed size and the argv has no operands at all.
-    try:
-        subprocess.run(["wl-copy"], input=payload, stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, timeout=5)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise Denied("wl-copy failed: %s" % type(exc).__name__)
-    emit({"copied": len(payload)})
+    emit({"copied": _wl_copy(text.encode("utf-8")[:CLIP_TEXT_BYTES])})
+
+
+def cmd_copy_text():
+    """Put a `copy` row on the clipboard. The text arrives on stdin.
+
+    Same reason as clipboard-copy: a calculator or unit result is still user
+    data, and argv is the one channel any local user can read off /proc.
+    """
+    payload = read_stdin(COPY_TEXT_BYTES)
+    if not payload:
+        raise Denied("nothing to copy")
+    if b"\x00" in payload:
+        raise Denied("text contains NUL")
+    emit({"copied": _wl_copy(payload)})
 
 
 def cmd_reminders():
@@ -1258,6 +1301,7 @@ COMMANDS = {
     "write-usage": (cmd_write_usage, False),
     "read-clipboard": (cmd_read_clipboard, False),
     "clipboard-copy": (cmd_clipboard_copy, True),
+    "copy-text": (cmd_copy_text, False),
     "reminders": (cmd_reminders, False),
     "suggest": (cmd_suggest, True),
     "files": (cmd_files, True),
