@@ -47,3 +47,11 @@ test("width and height clamps", () => {
   assert.equal(Dmenu.clampMaxHeight(-3), 0)
   assert.equal(Dmenu.clampMaxHeight(520), 520)
 })
+
+test("multi-select selections and toggling", () => {
+  const opts = ["\tUS", "\tVietnamese", "\tJapanese"]
+  assert.deepEqual(Dmenu.selections(opts, ["Vietnamese", "US", "Missing"], false), ["US", "Vietnamese"])
+  assert.deepEqual(Dmenu.selections(opts, ["Vietnamese", "US", "Missing"], true), ["Vietnamese", "US"])
+  assert.deepEqual(Dmenu.toggleSelection(["US"], "Vietnamese"), ["US", "Vietnamese"])
+  assert.deepEqual(Dmenu.toggleSelection(["US", "Vietnamese"], "US"), ["Vietnamese"])
+})

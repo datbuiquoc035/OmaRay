@@ -30,6 +30,7 @@ import json
 import os
 import re
 import select
+import shlex
 import signal
 import stat
 import subprocess
@@ -534,6 +535,72 @@ def cmd_write_settings():
     emit({"settings": settings})
 
 
+def cmd_read_icons():
+    """Map icon names to their highest-resolution file path (scalable > 512 > 256 > ...).
+
+    Omarchy's AppLibrary walks icon directories in filesystem order and keeps
+    the first hit per name, which maps multi-size hicolor icons like `steam` to
+    `16x16/apps/steam.png` when `16x16` sits before `256x256` in the directory
+    table. Scanning hicolor in descending resolution order guarantees the
+    sharpest asset wins.
+    """
+    sizes = (
+        "scalable", "512x512", "256x256", "192x192", "128x128",
+        "96x96", "72x72", "64x64", "48x48", "36x36", "32x32", "24x24", "16x16",
+    )
+    home = os.environ.get("HOME", "")
+    bases = []
+    if home.startswith("/"):
+        bases.append(os.path.join(home, ".icons", "hicolor"))
+        bases.append(os.path.join(home, ".local", "share", "icons", "hicolor"))
+    xdg_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
+    for part in xdg_dirs.split(":"):
+        part = part.strip()
+        if part.startswith("/"):
+            bases.append(os.path.join(part.rstrip("/"), "icons", "hicolor"))
+
+    icons = {}
+    for sz in sizes:
+        for base in bases:
+            for cat in ("apps", "devices"):
+                d = os.path.join(base, sz, cat)
+                try:
+                    entries = sorted(os.listdir(d))
+                except OSError:
+                    continue
+                # Prefer .svg before .png within the same size bucket
+                svgs = [f for f in entries if f.endswith(".svg")]
+                pngs = [f for f in entries if f.endswith(".png")]
+                for f in svgs + pngs:
+                    name = f[:-4]
+                    if not name or name in icons:
+                        continue
+                    full = os.path.join(d, f)
+                    if len(full) <= FILES_PATH_CHARS:
+                        icons[name] = full
+                    if len(icons) >= 4000:
+                        break
+
+    if os.path.isdir("/usr/share/pixmaps"):
+        try:
+            pix_entries = sorted(os.listdir("/usr/share/pixmaps"))
+        except OSError:
+            pix_entries = []
+        svgs = [f for f in pix_entries if f.endswith(".svg")]
+        pngs = [f for f in pix_entries if f.endswith(".png")]
+        for f in svgs + pngs:
+            name = f[:-4]
+            if not name or name in icons:
+                continue
+            full = os.path.join("/usr/share/pixmaps", f)
+            if len(full) <= FILES_PATH_CHARS:
+                icons[name] = full
+            if len(icons) >= 4000:
+                break
+
+    emit({"icons": icons})
+
+
 def cmd_read_hides():
     """The desktop ids Omarchy keeps out of its own launcher.
 
@@ -701,10 +768,14 @@ def normalize_menu(parsed):
             "parent": _menu_field(parent, 128),
             "kind": kind,
             "icon": _menu_field(raw.get("icon"), 16),
+            "iconFont": _menu_field(raw.get("iconFont"), 64),
             "label": _menu_field(raw.get("label")) or mid,
             "target": target,
             "action": action,
             "when": _menu_field(raw.get("when")),
+            "checked": _menu_field(raw.get("checked")),
+            "disabled": _menu_field(raw.get("disabled")),
+            "provider": _menu_field(raw.get("provider"), 64),
             "description": _menu_field(raw.get("description"), 512),
             "aliases": clean_aliases,
         })
@@ -737,31 +808,119 @@ def _read_menu_jsonc(system=True):
     return normalize_menu(parsed)
 
 
+LANGUAGE_RE = re.compile(r"^[a-z]{2,3}(?:-[A-Za-z]{2})?$")
+
+
+def _read_language_code():
+    """Return the active Omarchy language code (defaulting to 'en')."""
+    try:
+        fd = walk([".config", "omarchy"])
+    except (FileNotFoundError, Denied):
+        return "en"
+    try:
+        raw = read_file(fd, "language", 64)
+    except Denied:
+        raw = None
+    finally:
+        os.close(fd)
+    if not raw:
+        return "en"
+    code = raw.decode("utf-8", "replace").strip()
+    return code if LANGUAGE_RE.match(code) else "en"
+
+
+def _read_menu_catalog(lang):
+    """Read default/i18n/<lang>/menu.json when a translation exists."""
+    if not lang or lang == "en" or not LANGUAGE_RE.match(lang):
+        return {}
+    base = os.environ.get("OMARCHY_PATH", "").strip() or OMARCHY_FALLBACK_PATH
+    try:
+        fd = system_dir(base.rstrip("/") + "/default/i18n/" + lang)
+    except (FileNotFoundError, Denied):
+        return {}
+    try:
+        raw = read_file(fd, "menu.json", MENU_BYTES, SYSTEM_OWNERS)
+    except Denied:
+        raw = None
+    finally:
+        os.close(fd)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _apply_menu_translations(items, catalog):
+    """Apply menu.json translations to default items while keeping English searchable."""
+    if not isinstance(catalog, dict) or not catalog:
+        return items
+    out = []
+    for entry in items:
+        mid = entry.get("id")
+        tr = catalog.get(mid)
+        if not isinstance(tr, dict):
+            out.append(entry)
+            continue
+        copy = dict(entry)
+        tr_label = _menu_field(tr.get("label"), 128).strip()
+        if tr_label:
+            old_label = copy.get("label", "")
+            aliases = list(copy.get("aliases") or [])
+            if old_label and old_label != tr_label and old_label not in aliases and len(aliases) < 20:
+                aliases.append(old_label[:128])
+            copy["aliases"] = aliases
+            copy["label"] = tr_label
+        tr_desc = _menu_field(tr.get("description"), 512).strip()
+        if tr_desc:
+            copy["description"] = tr_desc
+        out.append(copy)
+    return out
+
+
 def cmd_menu_tree():
     """The stock install/remove subtrees, live from Omarchy's own data.
 
-    Merges the packaged menu with the user's extensions (user wins by id),
-    so browsing Install/Remove shows what `omarchy menu` would show —
-    including user additions — without vendoring the tree. Guards are NOT
-    evaluated here; the caller runs them through menu-guards.
+    Merges the packaged menu (translated via default/i18n/<lang>/menu.json)
+    with the user's extensions (user wins by id), so browsing Install/Remove
+    shows what `omarchy menu` would show — including user additions —
+    without vendoring the tree. Guards are NOT evaluated here; the caller
+    runs them through menu-guards.
     """
+    lang = _read_language_code()
+    catalog = _read_menu_catalog(lang)
+    default_rows = _apply_menu_translations(_read_menu_jsonc(True), catalog)
+    try:
+        user_rows = _read_menu_jsonc(False)
+    except (FileNotFoundError, Denied):
+        user_rows = []
     merged = {}
     order = []
-    for rows in (_read_menu_jsonc(True), _read_menu_jsonc(False)):
+    for rows in (default_rows, user_rows):
         for entry in rows:
             if entry["id"] not in merged:
                 order.append(entry["id"])
             merged[entry["id"]] = entry
-    emit({"items": [merged[mid] for mid in order]})
+    labels = {}
+    for mid, tr in catalog.items():
+        if isinstance(mid, str) and MENU_ID_RE.match(mid) and isinstance(tr, dict):
+            lbl = _menu_field(tr.get("label"), 128).strip()
+            if lbl:
+                labels[mid] = lbl
+    emit({"items": [merged[mid] for mid in order], "language": lang, "labels": labels})
 
 
 def cmd_menu_guards():
-    """Evaluate {id: when-expression} through one bash batch.
+    """Evaluate when/checked/disabled expressions through one bash batch.
 
-    stdin is a JSON object; stdout reports {"guards": {id: bool}}. The
-    package/command presence helpers from the stock menu are defined once
+    stdin is a JSON object mapping id -> when-expression (string) or
+    id -> {"when": ..., "checked": ..., "disabled": ...}.
+    stdout reports {"guards": {id: bool}, "checked": {id: bool}, "disabled": {id: bool}}.
+    The package/command presence helpers from the stock menu are defined once
     for the batch, so hundreds of guards cost one pacman pass. Output lines
-    anything but `<id>:w:<0|1>` is ignored — a failing expression hides
+    anything but `<id>:<w|c|d>:<0|1>` is ignored — a failing expression hides
     its row rather than breaking the batch.
     """
     raw = read_stdin(MENU_GUARD_BYTES)
@@ -780,51 +939,278 @@ def cmd_menu_guards():
         "for __omarchy_pkg in \"${__omarchy_pkg_names[@]}\"; do __omarchy_pkgs[$__omarchy_pkg]=1; done\n"
         "__omarchy_have() { [[ -n ${__omarchy_pkgs[$1]-} ]] && return 0; "
         "[[ $1 == *[\\<\\>=]* ]] && { pacman -Q \"$1\" &>/dev/null; return; }; return 1; }\n"
-        "omarchy-pkg-present() { local p; for p in \"$@\"; do pass \"$p\" || return 1; done; return 0; }\n"
-        "omarchy-pkg-missing() { local p; for p in \"$@\"; do pass \"$p\" || return 0; done; return 1; }\n"
+        "omarchy-pkg-present() { local p; for p in \"$@\"; do __omarchy_have \"$p\" || return 1; done; return 0; }\n"
+        "omarchy-pkg-missing() { local p; for p in \"$@\"; do __omarchy_have \"$p\" || return 0; done; return 1; }\n"
         "omarchy-cmd-present() { local c; for c in \"$@\"; do command -v \"$c\" &>/dev/null || return 1; done; return 0; }\n"
         "omarchy-cmd-missing() { local c; for c in \"$@\"; do command -v \"$c\" &>/dev/null || return 0; done; return 1; }\n"
     )
     # $[reader] calls are answered once up front (a failing reader cannot
     # take the batch down under errexit shells), not once per guard.
-    readers = ["omarchy-channel-current", "omarchy-default-agent",
-               "omarchy-default-browser", "omarchy-default-editor",
-               "omarchy-default-terminal", "omarchy-dns"]
+    readers = [
+        "omarchy-bar background",
+        "omarchy-bar get omarchy.power showPercentage",
+        "omarchy-bar get omarchy.clock format",
+        "omarchy-bar get omarchy.clock verticalFormat",
+        "omarchy-bar position",
+        "omarchy-channel-current",
+        "omarchy-default-agent",
+        "omarchy-default-browser",
+        "omarchy-default-editor",
+        "omarchy-default-terminal",
+        "omarchy-default-dictation",
+        "omarchy-dns",
+        "omarchy-dock autohide",
+        "omarchy-dock position",
+        "omarchy-hyprland-corners",
+        "omarchy-hyprland-window-transparency",
+        "omarchy-hyprland-workspace-layout-default",
+        "omarchy-shell notifications isDnd",
+        "omarchy-toggle-nightlight --status",
+    ]
     wanted_reads = set()
-    clean = {}
-    for mid, expr in wanted.items():
-        if not isinstance(mid, str) or not MENU_ID_RE.match(mid):
-            continue
-        if not isinstance(expr, str) or not expr.strip():
-            continue
-        if len(clean) >= MENU_GUARDS:
-            break
+    lines = []
+    valid_ids = set()
+
+    def substitute_readers(expr):
         body = expr
         for i, reader in enumerate(readers):
-            if "$(" + reader + ")" in body:
-                body = body.replace("$(" + reader + ")", "${__omarchy_read_%d}" % i)
+            token = "$(" + reader + ")"
+            if token in body:
+                body = body.replace(token, "${__omarchy_read_%d}" % i)
                 wanted_reads.add(i)
-        clean[mid] = body
-    if not clean:
-        emit({"guards": {}})
+        return body
+
+    for mid, spec in wanted.items():
+        if not isinstance(mid, str) or not MENU_ID_RE.match(mid):
+            continue
+        if len(valid_ids) >= MENU_GUARDS:
+            break
+        if isinstance(spec, str):
+            if not spec.strip():
+                continue
+            valid_ids.add(mid)
+            body = substitute_readers(spec[:MENU_FIELD_CHARS])
+            lines.append("if { %s; } >/dev/null 2>&1; then echo %s:w:1; else echo %s:w:0; fi\n"
+                         % (body, mid, mid))
+        elif isinstance(spec, dict):
+            added = False
+            for tag, field in (("w", "when"), ("c", "checked"), ("d", "disabled")):
+                expr = spec.get(field)
+                if isinstance(expr, str) and expr.strip():
+                    body = substitute_readers(expr[:MENU_FIELD_CHARS])
+                    lines.append("if { %s; } >/dev/null 2>&1; then echo %s:%s:1; else echo %s:%s:0; fi\n"
+                                 % (body, mid, tag, mid, tag))
+                    added = True
+            if added:
+                valid_ids.add(mid)
+
+    if not lines:
+        emit({"guards": {}, "checked": {}, "disabled": {}})
         return
     script = prelude
     for i in sorted(wanted_reads):
         script += "__omarchy_read_%d=$(%s 2>/dev/null) || :\n" % (i, readers[i])
-    for mid, body in clean.items():
-        script += ("if { %s; } >/dev/null 2>&1; then echo %s:w:1; else echo %s:w:0; fi\n"
-                   % (body, mid, mid))
-    ids = list(clean.keys())
-    if not ids:
-        emit({"guards": {}})
-        return
+    groups = [""] * min(8, len(lines))
+    for idx, line in enumerate(lines):
+        groups[idx % len(groups)] += line
+    for grp in groups:
+        script += "{\n%s} &\n" % grp
+    script += "wait\n"
     output, _ = run_bounded(["bash", "-c", script], MENU_GUARD_BYTES, MENU_GUARD_DEADLINE)
     guards = {}
+    checked = {}
+    disabled = {}
     for line in output.decode("utf-8", "replace").splitlines():
-        m = re.match(r"^([^:]+):w:([01])$", line.strip())
-        if m and m.group(1) in ids:
-            guards[m.group(1)] = (m.group(2) == "1")
-    emit({"guards": guards})
+        m = re.match(r"^([^:]+):([wcd]):([01])$", line.strip())
+        if not m or m.group(1) not in valid_ids:
+            continue
+        mid, tag, val = m.group(1), m.group(2), (m.group(3) == "1")
+        if tag == "w":
+            guards[mid] = val
+        elif tag == "c":
+            checked[mid] = val
+        elif tag == "d":
+            disabled[mid] = val
+    emit({"guards": guards, "checked": checked, "disabled": disabled})
+
+
+def _slugify(value):
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return slug or "item"
+
+
+def cmd_menu_providers():
+    """Enumerate runtime provider rows (fonts, languages, kernels, power-profiles).
+
+    stdin is a JSON object mapping {menu_id: provider_name}.
+    stdout reports {"items": [...]}.
+    """
+    raw = read_stdin(MENU_GUARD_BYTES)
+    try:
+        wanted = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+    except ValueError:
+        raise Denied("providers payload is not JSON")
+    if not isinstance(wanted, dict):
+        raise Denied("providers payload is not an object")
+
+    provider_specs = {
+        "fonts": (
+            'current=$(omarchy-font-current 2>/dev/null); '
+            'omarchy-font-list 2>/dev/null | while IFS= read -r f; do '
+            '[[ -z $f ]] && continue; printf "%s\\t%s\\t%s\\t%s\\n" "$1" "$f" "$f" "$current"; done',
+            "",
+            lambda v: "omarchy-font-set " + shlex.quote(v),
+            None,
+        ),
+        "languages": (
+            'current=$(omarchy-language 2>/dev/null); '
+            'omarchy-language list 2>/dev/null | while IFS=$\'\\t\' read -r name code english; do '
+            '[[ -z $code ]] && continue; printf "%s\\t%s\\t%s\\t%s\\t%s\\n" "$1" "$name" "$code" "$current" "$english"; done',
+            "\uf1ab",
+            lambda v: "omarchy-language " + shlex.quote(v),
+            None,
+        ),
+        "kernels": (
+            'current=$(omarchy-kernel get 2>/dev/null); '
+            'omarchy-kernel list 2>/dev/null | while IFS= read -r k; do '
+            '[[ -z $k ]] && continue; printf "%s\\t%s\\t%s\\t%s\\n" "$1" "$k" "$k" "$current"; done',
+            "\uf17c",
+            lambda v: "omarchy-kernel set " + shlex.quote(v),
+            None,
+        ),
+        "power-profiles": (
+            'current=$(powerprofilesctl get 2>/dev/null); '
+            'omarchy-powerprofiles-list 2>/dev/null | while IFS= read -r p; do '
+            '[[ -z $p ]] && continue; printf "%s\\t%s\\t%s\\t%s\\n" "$1" "$p" "$p" "$current"; done',
+            "\udb81\udc0b",
+            lambda v: "omarchy-powerprofiles-set autodetect " + shlex.quote(v),
+            {"power-saver": "Power Saver", "balanced": "Balanced", "performance": "Performance"},
+        ),
+    }
+
+    clean = {}
+    for mid, prov in wanted.items():
+        if not isinstance(mid, str) or not MENU_ID_RE.match(mid):
+            continue
+        if not isinstance(prov, str) or prov not in provider_specs:
+            continue
+        if len(clean) >= 32:
+            break
+        clean[mid] = prov
+
+    if not clean:
+        emit({"items": []})
+        return
+
+    script = ""
+    for mid, prov in clean.items():
+        snippet = provider_specs[prov][0]
+        script += "{\nset -- %s\n%s\n} &\n" % (shlex.quote(mid), snippet)
+    script += "wait\n"
+
+    output, _ = run_bounded(["bash", "-lc", script], MENU_BYTES, MENU_GUARD_DEADLINE)
+    by_menu = {mid: [] for mid in clean}
+    taken_ids = set()
+
+    for line in output.decode("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        mid = parts[0]
+        if mid not in clean:
+            continue
+        prov = clean[mid]
+        _, icon, action_for, label_map = provider_specs[prov]
+        raw_label = parts[1].strip()
+        value = (parts[2] or parts[1]).strip()
+        current = parts[3].strip()
+        extra = parts[4].strip() if len(parts) > 4 else ""
+        if not raw_label or not value:
+            continue
+        label = label_map.get(raw_label, raw_label) if label_map else raw_label
+        row_id = f"{mid}.{_slugify(value)}"[:120]
+        while row_id in taken_ids or not MENU_ID_RE.match(row_id):
+            row_id = (row_id[:118] + "-")
+        taken_ids.add(row_id)
+        aliases = []
+        if extra and extra.lower() != label.lower():
+            aliases.append(extra[:128])
+        if value.lower() != label.lower() and value not in aliases:
+            aliases.append(value[:128])
+        by_menu[mid].append({
+            "id": row_id,
+            "parent": mid,
+            "kind": "action",
+            "icon": icon,
+            "iconFont": "",
+            "label": label[:128],
+            "target": "",
+            "action": action_for(value)[:MENU_FIELD_CHARS],
+            "when": "",
+            "checked": "",
+            "disabled": "",
+            "provider": "",
+            "description": "",
+            "aliases": aliases[:20],
+            "isChecked": (value == current),
+            "providerMenu": mid,
+        })
+        if sum(len(v) for v in by_menu.values()) >= MENU_ITEMS:
+            break
+
+    items = []
+    for mid in clean:
+        items.extend(by_menu[mid])
+    emit({"items": items})
+
+
+def cmd_dmenu_onchange():
+    """Run a multi-select dmenu onChange command with the JSON selection appended.
+
+    stdin is {"command": [...], "selected": [...]}.
+    stdout reports {"applied": [...]} on exit code 0, or raises Denied on failure.
+    """
+    raw = read_stdin(MENU_GUARD_BYTES)
+    try:
+        parsed = json.loads(raw.decode("utf-8", "replace")) if raw else {}
+    except ValueError:
+        raise Denied("onchange payload is not JSON")
+    if not isinstance(parsed, dict):
+        raise Denied("onchange payload is not an object")
+    cmd = parsed.get("command")
+    selected = parsed.get("selected")
+    if not isinstance(cmd, list) or not (1 <= len(cmd) <= 16):
+        raise Denied("invalid onchange command")
+    if not all(isinstance(arg, str) and arg and "\x00" not in arg and len(arg) <= 4096 for arg in cmd):
+        raise Denied("invalid onchange command arguments")
+    if not isinstance(selected, list) or len(selected) > 1000:
+        raise Denied("invalid onchange selection")
+    clean_selected = [str(s)[:2048] for s in selected if isinstance(s, str) and "\x00" not in s]
+    full_cmd = list(cmd) + [json.dumps(clean_selected)]
+    try:
+        proc = subprocess.run(
+            full_cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Denied("onchange failed: %s" % type(exc).__name__)
+    if proc.returncode != 0:
+        raise Denied("onchange exited %d" % proc.returncode)
+    applied = clean_selected
+    out_text = (proc.stdout or b"")[:DMENU_SELECTION_BYTES].decode("utf-8", "replace").strip()
+    if out_text:
+        try:
+            decoded = json.loads(out_text)
+            if isinstance(decoded, list) and all(isinstance(x, str) for x in decoded):
+                applied = [x[:2048] for x in decoded[:1000]]
+        except ValueError:
+            pass
+    emit({"applied": applied})
 
 
 def _dmenu_file(path, what):
@@ -1247,6 +1633,60 @@ def cmd_file_preview(argv):
     }})
 
 
+def cmd_dock_pinned():
+    """Return the desktop ids currently pinned to the Omarchy dock."""
+    user_pinned = None
+    try:
+        fd = walk([".config", "omarchy"])
+    except (FileNotFoundError, Denied):
+        fd = None
+    if fd is not None:
+        try:
+            parsed = read_json(fd, "shell.json", SETTINGS_BYTES, {})
+        finally:
+            os.close(fd)
+        if isinstance(parsed, dict) and isinstance(parsed.get("dock"), dict):
+            raw_list = parsed["dock"].get("pinned")
+            if isinstance(raw_list, list):
+                user_pinned = raw_list
+
+    if user_pinned is None:
+        base = os.environ.get("OMARCHY_PATH", "").strip() or OMARCHY_FALLBACK_PATH
+        try:
+            dfd = system_dir(base.rstrip("/") + "/config/omarchy")
+        except (FileNotFoundError, Denied):
+            dfd = None
+        if dfd is not None:
+            try:
+                raw_def = read_file(dfd, "shell.json", SETTINGS_BYTES, SYSTEM_OWNERS)
+            finally:
+                os.close(dfd)
+            if raw_def:
+                try:
+                    parsed_def = json.loads(raw_def.decode("utf-8", "replace"))
+                except ValueError:
+                    parsed_def = {}
+                if isinstance(parsed_def, dict) and isinstance(parsed_def.get("dock"), dict):
+                    raw_list = parsed_def["dock"].get("pinned")
+                    if isinstance(raw_list, list):
+                        user_pinned = raw_list
+
+    out = []
+    seen = set()
+    for item in (user_pinned or []):
+        if not isinstance(item, str):
+            continue
+        val = item.strip()
+        if val.endswith(".desktop"):
+            val = val[:-8]
+        if val and HIDES_ID_RE.match(val) and val not in seen:
+            seen.add(val)
+            out.append(val)
+        if len(out) >= 200:
+            break
+    emit({"pinned": out})
+
+
 def cmd_write_ics(argv):
     if len(argv) != 1 or not ICS_STAMP_RE.match(argv[0]):
         raise Denied("bad event stamp")
@@ -1293,11 +1733,15 @@ COMMANDS = {
     "write-settings": (cmd_write_settings, False),
     "read-usage": (cmd_read_usage, False),
     "read-hides": (cmd_read_hides, False),
+    "read-icons": (cmd_read_icons, False),
     "read-emojis": (cmd_read_emojis, False),
     "hotkeys": (cmd_hotkeys, False),
     "menu-tree": (cmd_menu_tree, False),
     "menu-guards": (cmd_menu_guards, False),
+    "menu-providers": (cmd_menu_providers, False),
+    "dock-pinned": (cmd_dock_pinned, False),
     "dmenu-finish": (cmd_dmenu_finish, True),
+    "dmenu-onchange": (cmd_dmenu_onchange, False),
     "write-usage": (cmd_write_usage, False),
     "read-clipboard": (cmd_read_clipboard, False),
     "clipboard-copy": (cmd_clipboard_copy, True),

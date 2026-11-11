@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "lib/Calc.js" as Calc
 import "lib/Units.js" as Units
@@ -30,6 +31,11 @@ import "lib/System.js" as System
 // calculator has its own parser and every command runs through an argv vector.
 Item {
   id: root
+
+  Commons.Translations {
+    id: strings
+    directory: Qt.resolvedUrl("i18n")
+  }
 
   // ------------------------------------------------------------- injected
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
@@ -113,6 +119,11 @@ Item {
   readonly property bool dmenuActive: root.dmenuMode === "select" || root.dmenuMode === "input"
   property string dmenuPrompt: ""
   property var dmenuOptions: []
+  property bool dmenuMultiple: false
+  property var dmenuSelected: []
+  property var dmenuSaved: []
+  property var dmenuOnChange: []
+  property string dmenuChangeKey: ""
   property string selectionFile: ""
   property string doneFile: ""
   property bool requestActive: false
@@ -124,6 +135,9 @@ Item {
   property var menuItems: ({})
   property var menuOrder: []
   property var menuGuards: ({})
+  property var menuChecked: ({})
+  property var menuDisabled: ({})
+  property var menuCatalogLabels: ({})
   property string menuScope: ""
 
   // Destructive commands need a second Enter. Holds the row key that is armed.
@@ -140,6 +154,9 @@ Item {
   // list itself, so it is read only when the fallback source is the one
   // building the list.
   property var appHides: Apps.hiddenMap([])
+  // High-resolution icon map (scalable > 512 > 256 > ...) so multi-size
+  // hicolor icons like Steam resolve to 256x256 instead of 16x16.
+  property var iconMap: ({})
 
   // Decayed launch counts, keyed by row key. See lib/Frecency.js.
   property var usage: Frecency.emptyMap()
@@ -167,6 +184,11 @@ Item {
   readonly property int maxExpandedAppRows: 60
   // True while the Apps category is expanded; cleared on every open.
   property bool appsExpanded: false
+  // True when opened directly via the `apps` route (Super+Alt+Space) rather
+  // than drilled into from the Categories front page.
+  property bool appsRouteDirect: false
+  property var dockPinned: ({})
+  property var appMenuTarget: null
   // True while the System category is open; cleared on every open.
   property bool systemExpanded: false
   // The query a category tap or route last primed, untouched since. Left
@@ -207,10 +229,17 @@ Item {
   property string previewKindStr: ""
   property string previewForPath: ""
   property var previewInfo: null
-  readonly property bool showPreview: !root.dmenuActive && root.previewKindStr !== ""
+  readonly property bool showPreview: !root.dmenuActive && !root.appsExpanded && root.previewKindStr !== ""
   readonly property int previewWidth: Style.space(360)
   readonly property int wideCardWidth: Style.space(1120)
   readonly property int baseCardWidth: Style.space(750)
+  readonly property int gridColumns: 7
+  readonly property int gridVisibleRows: 4
+  readonly property int gridCellWidth: Style.space(124)
+  readonly property int gridCellHeight: Style.space(116)
+  readonly property int gridIconSize: Style.space(52)
+  readonly property int gridCardWidth: gridColumns * gridCellWidth + listPadding * 2
+  readonly property int gridListHeight: gridVisibleRows * gridCellHeight
 
   function previewKindFor(r) {
     if (!r || !r.key) return ""
@@ -229,14 +258,14 @@ Item {
 
   function previewKindLabel() {
     var k = root.previewKindStr
-    if (k === "file") return "File"
-    if (k === "clipboard") return "Clipboard"
-    if (k === "color") return "Color"
-    if (k === "emoji") return "Emoji"
-    if (k === "calc") return "Calculator"
-    if (k === "unit") return "Conversion"
-    if (k === "reminder") return "Reminder"
-    if (k === "event") return "Calendar"
+    if (k === "file") return strings.t("acc.file", "File")
+    if (k === "clipboard") return strings.t("section.clipboard", "Clipboard")
+    if (k === "color") return strings.t("acc.color", "Color")
+    if (k === "emoji") return strings.t("section.emoji", "Emoji")
+    if (k === "calc") return strings.t("section.calculator", "Calculator")
+    if (k === "unit") return strings.t("section.conversion", "Conversion")
+    if (k === "reminder") return strings.t("section.reminder", "Reminder")
+    if (k === "event") return strings.t("section.calendar", "Calendar")
     return ""
   }
 
@@ -399,6 +428,8 @@ Item {
     // The Apps category: the full frecency app list instead of the
     // categories front page. Reset on every open.
     root.appsExpanded = routeApps
+    root.appsRouteDirect = routeApps
+    root.appMenuTarget = null
     root.systemExpanded = routeSystem
     root.primedQuery = routeQuery
     root.opened = true
@@ -434,11 +465,14 @@ Item {
     root.refreshEmojis()
     root.refreshHotkeys(false)
     root.refreshMenuTree()
+    root.refreshDockPinned()
+    root.refreshIconMap()
     root.rebuild()
     pointerGate.reset()
     Qt.callLater(function() {
       input.forceActiveFocus()
       resultList.positionViewAtBeginning()
+      appGrid.positionViewAtBeginning()
     })
   }
 
@@ -453,6 +487,8 @@ Item {
     // stale category view behind. open() re-asserts all of these anyway.
     root.menuScope = ""
     root.appsExpanded = false
+    root.appsRouteDirect = false
+    root.appMenuTarget = null
     root.systemExpanded = false
     root.primedQuery = ""
     root.opened = false
@@ -480,12 +516,21 @@ Item {
     root.stopQueryWork()
     root.menuScope = ""
     root.appsExpanded = false
+    root.appsRouteDirect = false
+    root.appMenuTarget = null
     root.systemExpanded = false
     root.primedQuery = ""
     root.dmenuMode = payload.mode === "input" ? "input" : "select"
     root.dmenuPrompt = String(payload.prompt || (root.dmenuMode === "input" ? "Input" : "Select"))
     var opts = Array.isArray(payload.options) ? payload.options : []
     root.dmenuOptions = opts.slice(0, Dmenu.MAX_OPTIONS)
+    root.dmenuMultiple = root.dmenuMode === "select" && payload.multiple === true
+    root.dmenuOnChange = root.dmenuMultiple && Array.isArray(payload.onChange)
+      && payload.onChange.every(function(arg) { return typeof arg === "string" }) ? payload.onChange.slice(0, 16) : []
+    root.dmenuChangeKey = String(payload.changeKey || JSON.stringify(root.dmenuOnChange)).slice(0, 256)
+    var initSelected = Array.isArray(payload.selected) ? payload.selected.map(function(v) { return String(v || "") }) : []
+    root.dmenuSelected = Dmenu.selections(root.dmenuOptions, initSelected, root.dmenuOnChange.length > 0)
+    root.dmenuSaved = root.dmenuSelected
     root.selectionFile = String(payload.selectionFile || "")
     root.doneFile = String(payload.doneFile || "")
     root.requestActive = root.doneFile.length > 0
@@ -582,6 +627,24 @@ Item {
     root.appHides = Apps.hiddenMap(reply ? reply.hides : null)
   }
 
+  function refreshIconMap() {
+    if (iconsProc.running) return
+    iconsProc.command = root.helperArgv(["read-icons"])
+    iconsProc.running = true
+  }
+
+  function loadIconMap(raw) {
+    var reply = root.helperReply(raw)
+    var icons = (reply && reply.icons && typeof reply.icons === "object") ? reply.icons : null
+    if (!icons) return
+    var next = ({})
+    for (var k in icons) {
+      if (typeof icons[k] === "string" && icons[k].charAt(0) === "/") next[k] = icons[k]
+    }
+    root.iconMap = next
+    if (root.opened) root.rebuild()
+  }
+
   function refreshReminders() {
     remindersProc.running = false
     remindersProc.command = root.helperArgv(["reminders"])
@@ -626,10 +689,14 @@ Item {
         parent: String(e.parent || ""),
         kind: String(e.kind || "menu"),
         icon: String(e.icon || ""),
+        iconFont: String(e.iconFont || ""),
         label: String(e.label || e.id),
         target: String(e.target || ""),
         action: String(e.action || ""),
         when: String(e.when || ""),
+        checked: String(e.checked || ""),
+        disabled: String(e.disabled || ""),
+        provider: String(e.provider || ""),
         description: String(e.description || ""),
         aliases: Array.isArray(e.aliases) ? e.aliases.filter(function(a) {
           return typeof a === "string" && a
@@ -637,28 +704,41 @@ Item {
       }
       order.push(e.id)
     }
+    var labels = (reply && reply.labels && typeof reply.labels === "object") ? reply.labels : {}
+    var nextLabels = ({})
+    for (var lk in labels) {
+      if (typeof labels[lk] === "string" && labels[lk]) nextLabels[lk] = labels[lk]
+    }
+    root.menuCatalogLabels = nextLabels
     root.menuItems = items
     root.menuOrder = order
     root.refreshMenuGuards()
+    root.refreshMenuProviders()
     if (root.opened) root.rebuild()
   }
 
   function refreshMenuGuards() {
     var wanted = {}
     var count = 0
-    function want(id, when) {
-      if (!when) return
+    function want(id, when, checked, disabled) {
+      if (!when && !checked && !disabled) return
       if (wanted[id] === undefined) count++
-      wanted[id] = when
+      wanted[id] = {
+        when: String(when || ""),
+        checked: String(checked || ""),
+        disabled: String(disabled || "")
+      }
     }
     for (var i = 0; i < root.menuOrder.length; i++) {
       var e = root.menuItems[root.menuOrder[i]]
-      if (e && e.when) want(e.id, e.when)
+      if (e && (e.when || e.checked || e.disabled)) want(e.id, e.when, e.checked, e.disabled)
     }
     var sysDefs = System.defs()
-    for (var j = 0; j < sysDefs.length; j++) want(sysDefs[j].key, sysDefs[j].when)
+    for (var j = 0; j < sysDefs.length; j++) want(sysDefs[j].key, sysDefs[j].when, "", "")
     if (count === 0) {
       root.menuGuards = ({})
+      root.menuChecked = ({})
+      root.menuDisabled = ({})
       return
     }
     menuGuardsProc.stdinEnabled = true
@@ -671,9 +751,68 @@ Item {
   function loadMenuGuards(raw) {
     var reply = root.helperReply(raw)
     var guards = (reply && reply.guards && typeof reply.guards === "object") ? reply.guards : {}
-    var next = ({})
-    for (var k in guards) next[k] = guards[k] === true
-    root.menuGuards = next
+    var checked = (reply && reply.checked && typeof reply.checked === "object") ? reply.checked : {}
+    var disabled = (reply && reply.disabled && typeof reply.disabled === "object") ? reply.disabled : {}
+    var nextGuards = ({})
+    var nextChecked = ({})
+    var nextDisabled = ({})
+    for (var k in guards) nextGuards[k] = guards[k] === true
+    for (var ck in root.menuChecked) {
+      var existing = root.menuItems[ck]
+      if (existing && existing.providerMenu) nextChecked[ck] = root.menuChecked[ck] === true
+    }
+    for (var c in checked) nextChecked[c] = checked[c] === true
+    for (var d in disabled) nextDisabled[d] = disabled[d] === true
+    root.menuGuards = nextGuards
+    root.menuChecked = nextChecked
+    root.menuDisabled = nextDisabled
+    if (root.opened) root.rebuild()
+  }
+
+  function refreshMenuProviders() {
+    var wanted = {}
+    var count = 0
+    for (var i = 0; i < root.menuOrder.length; i++) {
+      var e = root.menuItems[root.menuOrder[i]]
+      if (!e || !e.provider || e.provider === "apps") continue
+      wanted[e.id] = e.provider
+      count++
+    }
+    if (count === 0) return
+    menuProvidersProc.running = false
+    menuProvidersProc.stdinEnabled = true
+    menuProvidersProc.command = root.helperArgv(["menu-providers"])
+    menuProvidersProc.running = true
+    menuProvidersProc.write(JSON.stringify(wanted))
+    menuProvidersProc.stdinEnabled = false
+  }
+
+  function loadMenuProviders(raw) {
+    var reply = root.helperReply(raw)
+    var list = (reply && Array.isArray(reply.items)) ? reply.items : []
+    var byMenu = ({})
+    var nextChecked = ({})
+    for (var ck in root.menuChecked) {
+      var prev = root.menuItems[ck]
+      if (!prev || !prev.providerMenu) nextChecked[ck] = root.menuChecked[ck] === true
+    }
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i]
+      if (!e || typeof e.id !== "string" || !e.id || !e.parent) continue
+      if (!byMenu[e.parent]) byMenu[e.parent] = []
+      byMenu[e.parent].push(e)
+      if (e.isChecked === true) nextChecked[e.id] = true
+    }
+    var items = root.menuItems
+    var order = root.menuOrder
+    for (var mid in byMenu) {
+      var swapped = Menu.swapProviderRows(items, order, mid, byMenu[mid])
+      items = swapped.items
+      order = swapped.order
+    }
+    root.menuItems = items
+    root.menuOrder = order
+    root.menuChecked = nextChecked
     if (root.opened) root.rebuild()
   }
 
@@ -1005,11 +1144,12 @@ Item {
   // themed lookup is what there is, and an app installed since login falls
   // back to the generic icon rather than showing none.
   function appIcon(icon) {
-    if (root.appLibrary) return root.appLibrary.iconSource(icon)
     var value = String(icon || "").trim()
     if (value.length === 0) return Quickshell.iconPath("application-x-executable", true)
     if (value.indexOf("file://") === 0 || value.indexOf("image://") === 0) return value
     if (value.charAt(0) === "/") return Util.fileUrl(value)
+    if (root.iconMap[value]) return Util.fileUrl(root.iconMap[value])
+    if (root.appLibrary) return root.appLibrary.iconSource(value)
     var themed = Quickshell.iconPath(value, true)
     if (themed && themed.length > 0) return themed
     return "file://" + Quickshell.env("HOME") + "/.local/share/icons/hicolor/256x256/apps/" + value + ".png"
@@ -1027,6 +1167,52 @@ Item {
     var id = String(appId || "")
     if (!id) return
     Util.execArgv(["uwsm-app", "--", "gtk-launch", id + ".desktop"])
+  }
+
+  function uninstallApp(appId, name) {
+    var id = String(appId || "")
+    if (!id) return
+    root.dismiss()
+    if (root.appLibrary) {
+      root.appLibrary.remove(id, String(name || id))
+      return
+    }
+    var base = root.omarchyPath || "/usr/share/omarchy"
+    Util.execArgv([base.replace(/\/$/, "") + "/bin/omarchy-remove-launcher-entry", id, String(name || id)])
+  }
+
+  function refreshDockPinned() {
+    dockPinnedProc.running = false
+    dockPinnedProc.command = root.helperArgv(["dock-pinned"])
+    dockPinnedProc.running = true
+  }
+
+  function loadDockPinned(raw) {
+    var reply = root.helperReply(raw)
+    var list = (reply && Array.isArray(reply.pinned)) ? reply.pinned : []
+    var next = ({})
+    for (var i = 0; i < list.length; i++) {
+      var id = String(list[i] || "").trim()
+      if (id) next[id] = true
+    }
+    root.dockPinned = next
+  }
+
+  function isAppPinned(appId) {
+    var id = String(appId || "").replace(/\.desktop$/, "")
+    return root.dockPinned[id] === true
+  }
+
+  function toggleAppDockPin(appId) {
+    var id = String(appId || "").replace(/\.desktop$/, "")
+    if (!id) return
+    var pinned = root.isAppPinned(id)
+    var next = ({})
+    for (var k in root.dockPinned) if (k !== id) next[k] = root.dockPinned[k]
+    if (!pinned) next[id] = true
+    root.dockPinned = next
+    root.appMenuTarget = null
+    Util.execArgv(["omarchy-dock", pinned ? "unpin" : "pin", id])
   }
 
   function appRows(q) {
@@ -1054,19 +1240,19 @@ Item {
       return a.order - b.order
     })
 
-    var limit = q ? Util.clamp(root.settings.maxApps, 3, root.maxAppRows)
-      : root.maxExpandedAppRows
+    var limit = root.appsExpanded ? root.maxAppCandidates
+      : (q ? Util.clamp(root.settings.maxApps, 3, root.maxAppRows) : root.maxExpandedAppRows)
     var out = []
     for (var j = 0; j < candidates.length && out.length < limit; j++) {
       var c = candidates[j]
       out.push(root.row({
         key: c.key,
-        section: "Applications", kind: "app",
+        section: strings.t("section.applications", "Applications"), kind: "app",
         title: root.appName(c.entry),
         subtitle: root.appSubtext(c.entry),
-        accessory: "Application",
+        accessory: strings.t("acc.application", "Application"),
         image: root.appIcon(c.entry.icon),
-        primaryLabel: "Open",
+        primaryLabel: strings.t("apps.open", "Open"),
         payload: { appId: String(c.entry.id || ""), name: root.appName(c.entry) }
       }))
     }
@@ -1111,9 +1297,9 @@ Item {
     for (var j = 0; j < scored.length && j < 5; j++) {
       out.push(root.row({
         key: scored[j].key,
-        section: "Open Windows", kind: "window",
+        section: strings.t("section.openWindows", "Open Windows"), kind: "window",
         title: scored[j].hit.title, subtitle: scored[j].hit.subtitle,
-        accessory: "Window", icon: "󰖯",
+        accessory: strings.t("acc.window", "Window"), icon: "󰖯",
         primaryLabel: "Focus window",
         secondaryLabel: "Close window",
         payload: { toplevel: scored[j].hit.toplevel }
@@ -1149,10 +1335,10 @@ Item {
       var c = scored[j].cmd
       out.push(root.row({
         key: "cmd:" + c.key,
-        section: c.kind === "url" ? "Quicklinks" : "Commands",
+        section: c.kind === "url" ? strings.t("section.quicklinks", "Quicklinks") : strings.t("section.commands", "Commands"),
         kind: c.kind,
         title: c.title, subtitle: c.subtitle,
-        accessory: c.kind === "url" ? "Link" : "Command",
+        accessory: c.kind === "url" ? strings.t("acc.link", "Link") : strings.t("acc.command", "Command"),
         icon: c.icon,
         primaryLabel: c.kind === "url" ? "Open in browser" : "Run",
         confirm: c.confirm === true,
@@ -1235,55 +1421,95 @@ Item {
     return root.categoryRowList(Categories.defs())
   }
 
+  function localizedCategoryDefs() {
+    var base = Categories.defs()
+    var out = []
+    for (var i = 0; i < base.length; i++) {
+      var d = base[i]
+      var menuId = d.key.slice(4)
+      var trTitle = root.menuCatalogLabels[menuId]
+        || (root.menuItems[menuId] && root.menuItems[menuId].label)
+        || d.title
+      var trSubtitle = strings.t(d.key + ".subtitle", d.subtitle)
+      var copy = {}
+      for (var k in d) copy[k] = d[k]
+      copy.title = trTitle
+      copy.subtitle = trSubtitle
+      if (trTitle !== d.title) copy.keywords = d.keywords + " " + d.title + " " + trTitle
+      out.push(copy)
+    }
+    return out
+  }
+
   // Categories stay visible while searching, ranked above everything but
   // direct answers — typing "app" must offer Apps before any hotkey.
   function categorySearchRows(q) {
-    if (!String(q || "").trim()) return []
-    var matches = Categories.match(q, root.fuzzyScore, 5)
+    var query = String(q || "").trim()
+    if (!query) return []
+    var list = root.localizedCategoryDefs()
+    var scored = []
+    for (var i = 0; i < list.length; i++) {
+      var s = root.fuzzyScore({ title: list[i].title, keywords: list[i].keywords }, query)
+      if (s < 0) continue
+      scored.push({ def: list[i], score: s, order: i })
+    }
+    scored.sort(function(a, b) {
+      if (b.score !== a.score) return b.score - a.score
+      return a.order - b.order
+    })
+    var matches = []
+    for (var j = 0; j < scored.length && matches.length < 5; j++) matches.push(scored[j].def)
     return root.categoryRowList(matches)
   }
 
   function categoryRowList(defs) {
     var out = []
+    var sec = strings.t("section.categories", "Categories")
+    var acc = strings.t("acc.category", "Category")
     for (var i = 0; i < defs.length; i++) {
       var d = defs[i]
+      var menuId = String(d.key || "").slice(4)
+      var title = root.menuCatalogLabels[menuId]
+        || (root.menuItems[menuId] && root.menuItems[menuId].label)
+        || d.title
+      var subtitle = strings.t(d.key + ".subtitle", d.subtitle)
       if (d.kind === "shell") {
         out.push(root.row({
-          key: d.key, section: "Categories", kind: "shell",
-          title: d.title, subtitle: d.subtitle,
-          accessory: "Category", icon: d.icon,
+          key: d.key, section: sec, kind: "shell",
+          title: title, subtitle: subtitle,
+          accessory: acc, icon: d.icon,
           primaryLabel: "Open",
           payload: { argv: d.argv }
         }))
       } else if (d.kind === "expand") {
         out.push(root.row({
-          key: d.key, section: "Categories", kind: "expand",
-          title: d.title, subtitle: d.subtitle,
-          accessory: "Category", icon: d.icon,
+          key: d.key, section: sec, kind: "expand",
+          title: title, subtitle: subtitle,
+          accessory: acc, icon: d.icon,
           primaryLabel: "Browse",
           payload: {}
         }))
       } else if (d.kind === "system") {
         out.push(root.row({
-          key: d.key, section: "Categories", kind: "system",
-          title: d.title, subtitle: d.subtitle,
-          accessory: "Category", icon: d.icon,
+          key: d.key, section: sec, kind: "system",
+          title: title, subtitle: subtitle,
+          accessory: acc, icon: d.icon,
           primaryLabel: "Browse",
           payload: {}
         }))
       } else if (d.kind === "menuscope") {
         out.push(root.row({
-          key: d.key, section: "Categories", kind: "menuscope",
-          title: d.title, subtitle: d.subtitle,
-          accessory: "Category", icon: d.icon,
+          key: d.key, section: sec, kind: "menuscope",
+          title: title, subtitle: subtitle,
+          accessory: acc, icon: d.icon,
           primaryLabel: "Browse",
           payload: { scope: d.scope }
         }))
       } else {
         out.push(root.row({
-          key: d.key, section: "Categories", kind: "prime",
-          title: d.title, subtitle: d.subtitle,
-          accessory: "Category", icon: d.icon,
+          key: d.key, section: sec, kind: "prime",
+          title: title, subtitle: subtitle,
+          accessory: acc, icon: d.icon,
           primaryLabel: "Browse",
           payload: { query: d.query }
         }))
@@ -1298,9 +1524,10 @@ Item {
   function learnRows(q) {
     if (String(q || "").trim().toLowerCase() !== "docs") return []
     return [root.row({
-      key: "learn.keybinds", section: "Learn", kind: "shell",
-      title: "Keybinds", subtitle: "Browse every Omarchy keybinding",
-      accessory: "Category", icon: "",
+      key: "learn.keybinds", section: strings.t("section.learn", "Learn"), kind: "shell",
+      title: strings.t("learn.keybindsTitle", "Keybinds"),
+      subtitle: strings.t("learn.keybindsSubtitle", "Browse every Omarchy keybinding"),
+      accessory: strings.t("acc.category", "Category"), icon: "",
       primaryLabel: "Open",
       payload: { argv: ["omarchy", "menu", "keybindings"] }
     })]
@@ -1313,6 +1540,8 @@ Item {
   function menuScopeRows() {
     var scope = root.menuScope
     if (!scope) return []
+    if (scope === "appearance" && !root.menuItems["appearance"] && root.menuItems["style"]) scope = "style"
+    else if (scope === "style" && !root.menuItems["style"] && root.menuItems["appearance"]) scope = "appearance"
     var q = String(root.query || "").trim().toLowerCase()
     var merged = { items: root.menuItems, order: root.menuOrder }
     var kids = Menu.childrenOf(merged, scope)
@@ -1323,8 +1552,10 @@ Item {
     var scored = []
     for (var i = 0; i < kids.length; i++) {
       var e = kids[i]
-      if (e.when && root.menuGuards[e.id] === false) continue
-      var s = Menu.matchScore({ id: e.id, label: e.label }, q)
+      if (!Menu.isVisible(merged, root.menuGuards, e)) continue
+      var s = Menu.matchScore({
+        id: e.id, label: e.label, aliases: e.aliases, description: e.description || ""
+      }, q)
       if (s < 0) continue
       scored.push({ entry: e, score: s, order: i })
     }
@@ -1335,11 +1566,22 @@ Item {
     var out = []
     for (var j = 0; j < scored.length; j++) {
       var m = scored[j].entry
-      if (m.kind === "action" && m.action) {
+      var title = Menu.labelFor(m, root.menuChecked, root.menuDisabled)
+      var disabled = Menu.isDisabled(root.menuDisabled, m)
+      var iconFont = m.iconFont || ""
+      if (disabled) {
+        out.push(root.row({
+          key: "menu:" + m.id, section: section, kind: "noop",
+          title: title, subtitle: "",
+          accessory: strings.t("acc.installed", "Installed"), icon: m.icon, iconFont: iconFont,
+          primaryLabel: "",
+          payload: {}
+        }))
+      } else if (m.kind === "action" && m.action) {
         out.push(root.row({
           key: "menu:" + m.id, section: section, kind: "menuaction",
-          title: m.label, subtitle: "",
-          accessory: section, icon: m.icon, iconFont: "omarchy",
+          title: title, subtitle: "",
+          accessory: section, icon: m.icon, iconFont: iconFont,
           primaryLabel: "Run",
           payload: { action: m.action }
         }))
@@ -1347,8 +1589,8 @@ Item {
         var target = m.kind === "link" && m.target ? m.target : m.id
         out.push(root.row({
           key: "menu:" + m.id, section: section, kind: "menuscope",
-          title: m.label, subtitle: "",
-          accessory: section, icon: m.icon, iconFont: "omarchy",
+          title: title, subtitle: "",
+          accessory: section, icon: m.icon, iconFont: iconFont,
           primaryLabel: "Open",
           payload: { scope: target }
         }))
@@ -1368,13 +1610,15 @@ Item {
   function menuSearchRows(q) {
     var query = String(q || "").trim()
     if (!query) return []
+    var merged = { items: root.menuItems, order: root.menuOrder }
     var scored = []
     for (var i = 0; i < root.menuOrder.length; i++) {
       var id = root.menuOrder[i]
       if (id === "root" || id === "apps") continue
       var e = root.menuItems[id]
       if (!e) continue
-      if (e.when && root.menuGuards[e.id] === false) continue
+      if (!Menu.isVisible(merged, root.menuGuards, e)) continue
+      if (Menu.isDisabled(root.menuDisabled, e)) continue
       var s = Menu.matchScore({
         id: e.id, label: e.label,
         keywords: "", aliases: e.aliases, description: e.description || ""
@@ -1387,23 +1631,28 @@ Item {
       return a.order - b.order
     })
     var out = []
+    var menuSec = strings.t("section.menu", "Menu")
+    var menuAcc = strings.t("acc.menu", "Menu")
     for (var j = 0; j < scored.length && out.length < root.maxMenuSearchRows; j++) {
       var m = scored[j].entry
       var path = Menu.menuPath(root.menuItems, m.id)
+      if (Commons.I18n.rightToLeft) path = path.replace(/ › /g, " ‹ ")
+      var title = Menu.labelFor(m, root.menuChecked, root.menuDisabled)
+      var iconFont = m.iconFont || ""
       if (m.kind === "action" && m.action) {
         out.push(root.row({
-          key: "menu:" + m.id, section: "Menu", kind: "menuaction",
-          title: m.label, subtitle: path,
-          accessory: "Menu", icon: m.icon, iconFont: "omarchy",
+          key: "menu:" + m.id, section: menuSec, kind: "menuaction",
+          title: title, subtitle: path,
+          accessory: menuAcc, icon: m.icon, iconFont: iconFont,
           primaryLabel: "Run",
           payload: { action: m.action }
         }))
       } else {
         var target = m.kind === "link" && m.target ? m.target : m.id
         out.push(root.row({
-          key: "menu:" + m.id, section: "Menu", kind: "menuscope",
-          title: m.label, subtitle: path,
-          accessory: "Menu", icon: m.icon, iconFont: "omarchy",
+          key: "menu:" + m.id, section: menuSec, kind: "menuscope",
+          title: title, subtitle: path,
+          accessory: menuAcc, icon: m.icon, iconFont: iconFont,
           primaryLabel: "Open",
           payload: { scope: target }
         }))
@@ -1417,13 +1666,18 @@ Item {
   function systemRows() {
     var defs = System.defs()
     var out = []
+    var sysSec = root.menuCatalogLabels["system"] || strings.t("section.system", "System")
+    var sysAcc = root.menuCatalogLabels["system"] || strings.t("acc.system", "System")
     for (var i = 0; i < defs.length; i++) {
       var d = defs[i]
       if (d.when && root.menuGuards[d.key] === false) continue
+      var trTitle = root.menuCatalogLabels[d.key]
+        || (root.menuItems[d.key] && root.menuItems[d.key].label)
+        || d.title
       out.push(root.row({
-        key: d.key, section: "System", kind: "menuaction",
-        title: d.title, subtitle: "",
-        accessory: "System", icon: d.icon,
+        key: d.key, section: sysSec, kind: "menuaction",
+        title: trTitle, subtitle: "",
+        accessory: sysAcc, icon: d.icon,
         primaryLabel: d.confirm ? "Confirm" : "Run",
         confirm: d.confirm,
         payload: { action: d.action }
@@ -1450,9 +1704,9 @@ Item {
     for (var i = 0; i < ranked.length; i++) {
       out.push(root.row({
         key: "clip:" + ranked[i].index,
-        section: "Clipboard History", kind: "clipcopy",
+        section: strings.t("section.clipboard", "Clipboard History"), kind: "clipcopy",
         title: ranked[i].title, subtitle: "",
-        accessory: "Copy", icon: "󰅌", mono: true,
+        accessory: strings.t("acc.copy", "Copy"), icon: "󰅌", mono: true,
         primaryLabel: "Copy to clipboard",
         payload: {
           index: ranked[i].index,
@@ -1491,9 +1745,9 @@ Item {
     for (var j = 0; j < scored.length; j++) {
       var s = scored[j].found
       out.push(root.row({
-        key: scored[j].key, section: "Emoji", kind: "copy",
+        key: scored[j].key, section: strings.t("section.emoji", "Emoji"), kind: "copy",
         title: Emoji.title(s.k), subtitle: "",
-        accessory: "Copy", icon: s.e,
+        accessory: strings.t("acc.copy", "Copy"), icon: s.e,
         primaryLabel: "Copy emoji",
         payload: {
           text: s.e,
@@ -1529,11 +1783,12 @@ Item {
     }
     scored.sort(function(a, b) { return b.score - a.score })
     var out = []
+    var hkSec = strings.t("section.hotkeys", "Hotkeys")
     for (var j = 0; j < scored.length; j++) {
       var sp = scored[j].spec
       if (sp.runnable) {
         out.push(root.row({
-          key: scored[j].key, section: "Hotkeys", kind: "shell",
+          key: scored[j].key, section: hkSec, kind: "shell",
           title: sp.label, subtitle: sp.subtitle,
           accessory: sp.accessory, icon: "",
           primaryLabel: "Run",
@@ -1541,7 +1796,7 @@ Item {
         }))
       } else {
         out.push(root.row({
-          key: scored[j].key, section: "Hotkeys", kind: "noop",
+          key: scored[j].key, section: hkSec, kind: "noop",
           title: sp.label, subtitle: sp.subtitle,
           accessory: sp.accessory, icon: "",
           primaryLabel: ""
@@ -1559,13 +1814,25 @@ Item {
     var q = String(root.query || "").trim()
     var found = Dmenu.filterOptions(root.dmenuOptions, q)
     var out = []
+    if (root.dmenuMultiple && root.dmenuOnChange.length === 0) {
+      out.push(root.row({
+        key: "dmenu.apply", section: root.dmenuPrompt || Commons.I18n.t("menu.selectPrompt", "Select"), kind: "dmenu-apply",
+        title: Commons.I18n.t("common.apply", "Apply"),
+        subtitle: Commons.I18n.tn("menu.selectedCount", root.dmenuSelected.length, "%1 selected").arg(Commons.I18n.formatNumber(root.dmenuSelected.length)),
+        accessory: strings.t("acc.confirm", "Confirm"), icon: "󰄬",
+        primaryLabel: Commons.I18n.t("common.apply", "Apply"),
+        payload: {}
+      }))
+    }
     for (var i = 0; i < found.length; i++) {
       var f = found[i]
+      var isSel = root.dmenuMultiple && root.dmenuSelected.indexOf(f.value) !== -1
       out.push(root.row({
-        key: "dmenu:" + f.index, section: root.dmenuPrompt || "Select", kind: "dmenu",
+        key: "dmenu:" + f.index, section: root.dmenuPrompt || Commons.I18n.t("menu.selectPrompt", "Select"), kind: "dmenu",
         title: f.label, subtitle: f.detail,
-        accessory: "", icon: f.icon,
-        primaryLabel: "Select",
+        accessory: root.dmenuMultiple ? (isSel ? strings.t("acc.selected", "Selected") : "") : "",
+        icon: root.dmenuMultiple ? (isSel ? "✓" : "○") : f.icon,
+        primaryLabel: root.dmenuMultiple ? (isSel ? "Deselect" : "Select") : "Select",
         payload: { value: f.value }
       }))
     }
@@ -1574,10 +1841,12 @@ Item {
 
   function reminderListRows(q) {
     if (!/^reminders?$/i.test(String(q || "").trim())) return []
+    var remSec = strings.t("section.reminders", "Reminders")
     if (root.reminderRows.length === 0) {
       return [root.row({
-        key: "reminder.none", section: "Reminders", kind: "noop",
-        title: "No active reminders", subtitle: "Try “remind me in 20m to …”",
+        key: "reminder.none", section: remSec, kind: "noop",
+        title: strings.t("reminders.none", "No active reminders"),
+        subtitle: strings.t("reminders.tryHint", "Try “remind me in 20m to …”"),
         accessory: "", icon: "󰢌", primaryLabel: ""
       })]
     }
@@ -1586,16 +1855,17 @@ Item {
       var r = root.reminderRows[i]
       out.push(root.row({
         key: "reminder.active." + i,
-        section: "Reminders", kind: "noop",
+        section: remSec, kind: "noop",
         title: String(r.label || ""),
         subtitle: "in " + String(r.remaining || "") + " · at " + String(r.atTime || ""),
-        accessory: "Active", icon: "󰔟", primaryLabel: ""
+        accessory: strings.t("acc.active", "Active"), icon: "󰔟", primaryLabel: ""
       }))
     }
     out.push(root.row({
-      key: "reminder.clear", section: "Reminders", kind: "shell",
-      title: "Clear all reminders", subtitle: root.reminderRows.length + " active",
-      accessory: "Command", icon: "󰩹",
+      key: "reminder.clear", section: remSec, kind: "shell",
+      title: strings.t("reminders.clearAll", "Clear all reminders"),
+      subtitle: strings.tn("reminders.activeCount", root.reminderRows.length, "%1 active").arg(Commons.I18n.formatNumber(root.reminderRows.length)),
+      accessory: strings.t("acc.command", "Command"), icon: "󰩹",
       primaryLabel: "Clear", payload: { argv: ["omarchy", "reminder", "clear"] }
     }))
     return out
@@ -1604,13 +1874,14 @@ Item {
   function fileResultRows(q) {
     if (root.fileRows.length === 0) return []
     var out = []
+    var fileSec = strings.t("section.files", "Files")
     for (var i = 0; i < root.fileRows.length && i < root.maxFileRows; i++) {
       var f = root.fileRows[i]
       out.push(root.row({
         key: "file:" + f.path,
-        section: "Files", kind: "file",
+        section: fileSec, kind: "file",
         title: f.name, subtitle: f.dir,
-        accessory: f.isDir ? "Folder" : "File",
+        accessory: f.isDir ? strings.t("acc.folder", "Folder") : strings.t("acc.file", "File"),
         icon: f.isDir ? "󰉋" : "󰈔",
         primaryLabel: "Open",
         secondaryLabel: "Open folder",
@@ -1629,15 +1900,16 @@ Item {
     if (root.suggestionRows.length === 0) return []
     var engine = String(root.settings.searchEngine || "g")
     var out = []
+    var suggSec = strings.t("section.webSuggestions", "Web Suggestions")
     for (var i = 0; i < root.suggestionRows.length; i++) {
       var s = root.suggestionRows[i]
       out.push(root.row({
         key: "sugg:" + s,
-        section: "Web Suggestions", kind: "url",
+        section: suggSec, kind: "url",
         title: s, subtitle: "",
         accessory: Web.engineName(engine),
         icon: Web.engineIcon(engine),
-        primaryLabel: "Search " + Web.engineName(engine),
+        primaryLabel: strings.t("web.searchEngine", "Search %1").arg(Web.engineName(engine)),
         payload: { url: Web.searchUrl(s, engine) }
       }))
     }
@@ -1649,12 +1921,12 @@ Item {
     if (Web.detectUrl(q)) return []
     var engine = String(root.settings.searchEngine || "g")
     return [root.row({
-      key: "web.fallback", section: "Search the Web", kind: "url",
-      title: "Search " + Web.engineName(engine) + " for “" + q + "”",
+      key: "web.fallback", section: strings.t("section.searchWeb", "Search the Web"), kind: "url",
+      title: strings.t("web.searchFor", "Search %1 for “%2”").arg(Web.engineName(engine)).arg(q),
       subtitle: "",
       accessory: Web.engineName(engine),
       icon: Web.engineIcon(engine),
-      primaryLabel: "Search " + Web.engineName(engine),
+      primaryLabel: strings.t("web.searchEngine", "Search %1").arg(Web.engineName(engine)),
       payload: { url: Web.searchUrl(q, engine) }
     })]
   }
@@ -1698,16 +1970,23 @@ Item {
     var next = []
     function push(list) { for (var i = 0; i < list.length; i++) next.push(list[i]) }
 
-    // Idle is the categories front page only; Apps expands the full app
-    // list, System shows its seven rows, Install/Remove open the stock
-    // subtrees. Any keystroke leaves for full search.
+    // Dedicated App Launcher grid mode: stays in the app grid even while
+    // typing so Super+Alt+Space (or the Apps category) filters apps in-place.
+    if (root.appsExpanded) {
+      root.appMenuTarget = null
+      push(root.appRows(q))
+      root.rows = next
+      root.finishRebuild(next)
+      return
+    }
+
+    // Idle is the categories front page only; System shows its seven rows,
+    // Install/Remove/Appearance open the stock subtrees. Any keystroke leaves
+    // for full search.
     if (!q) {
       if (root.menuScope) push(root.menuScopeRows())
       else if (root.systemExpanded) push(root.systemRows())
-      else {
-        push(root.categoryRows())
-        if (root.appsExpanded) push(root.appRows(q))
-      }
+      else push(root.categoryRows())
       root.rows = next
       root.finishRebuild(next)
       return
@@ -1766,7 +2045,10 @@ Item {
     pointerGate.reset()
     root.updatePreview()
     Qt.callLater(function() {
-      if (displayModel.count > 0) resultList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+      if (displayModel.count > 0) {
+        if (root.appsExpanded) appGrid.positionViewAtIndex(root.selectedIndex, GridView.Contain)
+        else resultList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+      }
     })
   }
 
@@ -1810,7 +2092,23 @@ Item {
   function select(delta) {
     var count = root.rows.length
     if (count === 0) return
+    root.appMenuTarget = null
     var index = root.selectedIndex
+    if (root.appsExpanded) {
+      if (Math.abs(delta) === 1) {
+        index = (index + delta + count) % count
+      } else {
+        var nextIdx = index + delta
+        if (nextIdx >= 0 && nextIdx < count) index = nextIdx
+      }
+      root.selectedIndex = index
+      root.pinnedKey = root.selectedRowKey()
+      root.cursorActive = true
+      root.armedKey = ""
+      pointerGate.reset()
+      appGrid.positionViewAtIndex(index, GridView.Contain)
+      return
+    }
     for (var step = 0; step < count; step++) {
       index = (index + delta + count) % count
       if (root.rows[index] && root.rows[index].kind !== "noop") break
@@ -1827,6 +2125,18 @@ Item {
   function selectPage(delta) {
     var count = root.rows.length
     if (count === 0) return
+    root.appMenuTarget = null
+    if (root.appsExpanded) {
+      var pageStep = root.gridColumns * root.gridVisibleRows
+      var gIndex = Math.max(0, Math.min(count - 1, root.selectedIndex + delta * pageStep))
+      root.selectedIndex = gIndex
+      root.pinnedKey = root.selectedRowKey()
+      root.cursorActive = true
+      root.armedKey = ""
+      pointerGate.reset()
+      appGrid.positionViewAtIndex(gIndex, GridView.Contain)
+      return
+    }
     var visible = Math.max(1, Math.floor(resultList.height / root.rowHeight))
     var index = Math.max(0, Math.min(count - 1, root.selectedIndex + delta * visible))
     while (index >= 0 && index < count && root.rows[index] && root.rows[index].kind === "noop")
@@ -1864,6 +2174,12 @@ Item {
   function activate(index, secondary) {
     var r = root.rows[index]
     if (!r || r.kind === "noop") return
+
+    if (root.appsExpanded && r.kind === "app" && root.armedKey === "uninstall:" + r.key) {
+      root.armedKey = ""
+      root.uninstallApp(r.payload.appId, r.payload.name)
+      return
+    }
 
     // One confirmation for the rows that end the session.
     if (r.confirm && !secondary && root.armedKey !== r.key) {
@@ -1963,9 +2279,26 @@ Item {
       root.applySetting(String(r.payload.key || ""), secondary ? -1 : 1)
       break
 
-    case "dmenu":
-      root.finishRequest(String(r.payload.value || ""))
+    case "dmenu-apply":
+      root.finishRequest(JSON.stringify(Dmenu.selections(root.dmenuOptions, root.dmenuSelected, false)))
       root.dismiss()
+      break
+
+    case "dmenu":
+      if (root.dmenuMultiple) {
+        var nextSel = Dmenu.toggleSelection(root.dmenuSelected, String(r.payload.value || ""))
+        root.dmenuSelected = Dmenu.selections(root.dmenuOptions, nextSel, root.dmenuOnChange.length > 0)
+        root.pinnedKey = r.key
+        root.rebuild()
+        if (root.dmenuOnChange.length > 0) {
+          root.runDmenuOnChange(root.dmenuSelected)
+        } else {
+          root.dmenuSaved = root.dmenuSelected
+        }
+      } else {
+        root.finishRequest(String(r.payload.value || ""))
+        root.dismiss()
+      }
       break
 
     case "prime":
@@ -1978,6 +2311,8 @@ Item {
 
     case "expand":
       root.appsExpanded = true
+      root.appsRouteDirect = false
+      root.appMenuTarget = null
       root.primedQuery = ""
       input.text = ""
       root.rebuild()
@@ -1993,9 +2328,13 @@ Item {
     case "menuscope":
       // Drilling in clears the query: the scope browses unfiltered, the
       // way tapping a category from the front page does.
-      root.menuScope = String(r.payload.scope || "")
+      var nextScope = String(r.payload.scope || "")
+      root.menuScope = nextScope
       root.primedQuery = ""
       input.text = ""
+      if (root.menuItems[nextScope] && root.menuItems[nextScope].provider) {
+        root.refreshMenuProviders()
+      }
       root.rebuild()
       break
 
@@ -2368,6 +2707,32 @@ Item {
     }
   }
 
+  function runDmenuOnChange(selected) {
+    if (!root.dmenuActive || root.dmenuOnChange.length === 0) return
+    dmenuChangeProc.running = false
+    dmenuChangeProc.changeKey = root.dmenuChangeKey
+    dmenuChangeProc.stdinEnabled = true
+    dmenuChangeProc.command = root.helperArgv(["dmenu-onchange"])
+    dmenuChangeProc.running = true
+    dmenuChangeProc.write(JSON.stringify({
+      command: root.dmenuOnChange,
+      selected: selected
+    }))
+    dmenuChangeProc.stdinEnabled = false
+  }
+
+  function loadDmenuOnChange(raw, changeKey) {
+    if (!root.dmenuActive || changeKey !== root.dmenuChangeKey) return
+    var reply = root.helperReply(raw)
+    if (reply && Array.isArray(reply.applied)) {
+      root.dmenuSelected = Dmenu.selections(root.dmenuOptions, reply.applied, true)
+      root.dmenuSaved = root.dmenuSelected
+    } else {
+      root.dmenuSelected = root.dmenuSaved
+    }
+    if (root.opened) root.rebuild()
+  }
+
   Process {
     id: menuTreeProc
     stdout: StdioCollector {
@@ -2385,7 +2750,32 @@ Item {
   }
 
   Process {
+    id: menuProvidersProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadMenuProviders(text)
+    }
+  }
+
+  Process {
+    id: dmenuChangeProc
+    property string changeKey: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadDmenuOnChange(text, dmenuChangeProc.changeKey)
+    }
+  }
+
+  Process {
     id: dmenuFinishProc
+  }
+
+  Process {
+    id: dockPinnedProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadDockPinned(text)
+    }
   }
 
   Process {
@@ -2393,6 +2783,14 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.loadHides(text)
+    }
+  }
+
+  Process {
+    id: iconsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadIconMap(text)
     }
   }
 
@@ -2424,6 +2822,7 @@ Item {
     if (root.appLibrary) root.appLibrary.refreshIcons()
     root.refreshSettings()
     root.refreshUsage()
+    root.refreshIconMap()
   }
 
   // Unloading the plugin must not leave a reader behind. Each helper run has
@@ -2441,7 +2840,11 @@ Item {
     hotkeysProc.running = false
     menuTreeProc.running = false
     menuGuardsProc.running = false
+    menuProvidersProc.running = false
+    dmenuChangeProc.running = false
+    dockPinnedProc.running = false
     hidesProc.running = false
+    iconsProc.running = false
     usageReadProc.running = false
     usageWriteProc.running = false
     icsProc.running = false
@@ -2450,6 +2853,15 @@ Item {
   Connections {
     target: root.appLibrary
     function onAppsChanged() { if (root.opened) root.rebuild() }
+  }
+
+  Connections {
+    target: Commons.I18n
+    function onLanguageChanged() {
+      root.refreshMenuTree()
+      root.refreshHotkeys(true)
+      if (root.opened) root.rebuild()
+    }
   }
 
   ListModel { id: displayModel }
@@ -2497,17 +2909,21 @@ Item {
     Rectangle {
       id: card
 
-      readonly property int listHeight: Math.min(root.maxListHeight, root.contentHeight)
-      readonly property bool hasResults: displayModel.count > 0
+      readonly property int listHeight: root.appsExpanded
+        ? root.gridListHeight
+        : Math.min(root.maxListHeight, root.contentHeight)
+      readonly property bool hasResults: root.appsExpanded || displayModel.count > 0
 
       // Picker callers size the card: width honors their --width inside
       // the panel, and the list scrolls inside maxListHeight. Previewable
       // selections widen to list + preview; everything else stays narrow.
       width: root.dmenuActive
         ? Math.min(Style.space(root.dmenuWidth), panel.width - Style.space(48))
-        : (root.showPreview
-          ? Math.min(root.wideCardWidth, panel.width - Style.space(48))
-          : Math.min(root.baseCardWidth, panel.width - Style.space(48)))
+        : (root.appsExpanded
+          ? Math.min(root.gridCardWidth, panel.width - Style.space(48))
+          : (root.showPreview
+            ? Math.min(root.wideCardWidth, panel.width - Style.space(48))
+            : Math.min(root.baseCardWidth, panel.width - Style.space(48))))
       height: root.searchHeight
         + (hasResults ? root.hairline + root.listPadding * 2 + listHeight : 0)
         + root.hairline + root.footerHeight
@@ -2532,7 +2948,11 @@ Item {
       }
 
       // Swallow clicks so they don't reach the dismiss MouseArea behind.
-      MouseArea { anchors.fill: parent; onClicked: {} }
+      MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.LeftButton | Qt.RightButton
+        onClicked: root.appMenuTarget = null
+      }
 
       // The 1px light line along the top edge is what makes a translucent
       // panel read as glass rather than as a flat tint.
@@ -2591,7 +3011,9 @@ Item {
           Text {
             anchors.fill: parent
             visible: input.text.length === 0
-            text: root.dmenuActive && root.dmenuPrompt.length > 0 ? root.dmenuPrompt : "Search for apps and commands…"
+            text: root.dmenuActive && root.dmenuPrompt.length > 0
+              ? root.dmenuPrompt
+              : (root.appsExpanded ? strings.t("search.appsPlaceholder", "Search applications…") : strings.t("search.placeholder", "Search for apps and commands…"))
             textFormat: Text.PlainText
             color: root.foreground
             opacity: 0.38
@@ -2607,21 +3029,48 @@ Item {
           Keys.priority: Keys.BeforeItem
           Keys.onPressed: function(event) {
             typingGuard.restart()
-            if (event.key === Qt.Key_Escape) {
+            if (event.key === Qt.Key_Delete && root.appsExpanded) {
+              var delSel = root.selectedRow()
+              if (delSel && delSel.kind === "app" && delSel.payload) {
+                var armKey = "uninstall:" + delSel.key
+                if (root.armedKey === armKey) {
+                  root.armedKey = ""
+                  root.uninstallApp(delSel.payload.appId, delSel.payload.name)
+                } else {
+                  root.armedKey = armKey
+                }
+              }
+              event.accepted = true
+            } else if (event.key === Qt.Key_Escape) {
               // A pristine category prime exits outright — Left is the way
               // back to categories. Anything typed stays two-step.
-              if (input.text.length > 0
-                  && (root.primedQuery === "" || input.text !== root.primedQuery))
+              if (root.appMenuTarget) {
+                root.appMenuTarget = null
+              } else if (root.armedKey.length > 0) {
+                root.armedKey = ""
+              } else if (input.text.length > 0
+                  && (root.primedQuery === "" || input.text !== root.primedQuery)) {
                 input.text = ""
-              else root.dismiss()
+              } else if (root.appsExpanded && !root.appsRouteDirect) {
+                root.appsExpanded = false
+                root.rebuild()
+              } else {
+                root.dismiss()
+              }
+              event.accepted = true
+            } else if (event.key === Qt.Key_Backspace
+                && root.appsExpanded && !root.appsRouteDirect
+                && input.text.length === 0) {
+              root.appsExpanded = false
+              root.rebuild()
               event.accepted = true
             } else if (event.key === Qt.Key_Down
                 || (event.key === Qt.Key_N && event.modifiers === Qt.ControlModifier)) {
-              root.select(1)
+              root.select(root.appsExpanded ? root.gridColumns : 1)
               event.accepted = true
             } else if (event.key === Qt.Key_Up
                 || (event.key === Qt.Key_P && event.modifiers === Qt.ControlModifier)) {
-              root.select(-1)
+              root.select(root.appsExpanded ? -root.gridColumns : -1)
               event.accepted = true
             } else if (event.key === Qt.Key_PageDown) {
               root.selectPage(1)
@@ -2641,16 +3090,20 @@ Item {
               event.accepted = true
             } else if (event.key === Qt.Key_Left
                 && event.modifiers === Qt.NoModifier && !root.dmenuActive) {
-              // Left climbs out: one scope level, the expanded Apps list on
-              // an empty query, or a primed query still pristine since its
-              // tap (same text, caret never moved). Anything edited or
-              // navigated, and every picker field, keeps caret duty.
-              if (root.menuScope) {
+              // In the App Grid, Left/Right step across tiles; in list mode,
+              // Left climbs out of scopes, System, or a pristine category prime.
+              if (root.appsExpanded) {
+                if (displayModel.count > 0) root.select(-1)
+                else if (!root.appsRouteDirect && input.text.length === 0) {
+                  root.appsExpanded = false
+                  root.rebuild()
+                }
+                event.accepted = true
+              } else if (root.menuScope) {
                 root.menuScope = Menu.parentScope(root.menuScope)
                 root.rebuild()
                 event.accepted = true
-              } else if ((root.appsExpanded || root.systemExpanded) && input.text.length === 0) {
-                root.appsExpanded = false
+              } else if (root.systemExpanded && input.text.length === 0) {
                 root.systemExpanded = false
                 root.rebuild()
                 event.accepted = true
@@ -2661,15 +3114,18 @@ Item {
                 event.accepted = true
               }
             } else if (event.key === Qt.Key_Right
-                && event.modifiers === Qt.NoModifier && !root.dmenuActive
-                && input.text.length === 0) {
-              // Right opens the selected category — the mirror of Left goes
-              // back. Only cat.* rows answer; on an app, or with text to move
-              // through, Right keeps its normal caret job.
-              var cat = root.selectedRow()
-              if (cat && cat.key && String(cat.key).indexOf("cat.") === 0) {
-                root.activate(root.selectedIndex, false)
+                && event.modifiers === Qt.NoModifier && !root.dmenuActive) {
+              // Right steps forward in the App Grid, or opens the selected
+              // category on an empty query.
+              if (root.appsExpanded) {
+                if (displayModel.count > 0) root.select(1)
                 event.accepted = true
+              } else if (input.text.length === 0) {
+                var cat = root.selectedRow()
+                if (cat && cat.key && String(cat.key).indexOf("cat.") === 0) {
+                  root.activate(root.selectedIndex, false)
+                  event.accepted = true
+                }
               }
             }
           }
@@ -2716,6 +3172,7 @@ Item {
             ListView {
               id: resultList
               anchors.fill: parent
+              visible: !root.appsExpanded
           model: displayModel
           clip: true
           boundsBehavior: Flickable.StopAtBounds
@@ -2815,7 +3272,7 @@ Item {
 
             Text {
               id: accessoryText
-              text: resultRow.armed ? "Press ↵ again to confirm" : resultRow.rowAccessory
+              text: resultRow.armed ? strings.t("confirm.pressAgain", "Press ↵ again to confirm") : resultRow.rowAccessory
               textFormat: Text.PlainText
               color: resultRow.armed ? Color.urgent : root.foreground
               opacity: resultRow.armed ? 1 : 0.38
@@ -2886,6 +3343,252 @@ Item {
               }
             }
           }
+            }
+
+            // ----------------------------------------------- app launcher grid
+            Item {
+              id: appGridContainer
+              anchors.fill: parent
+              visible: root.appsExpanded
+
+              GridView {
+                id: appGrid
+                width: root.gridColumns * root.gridCellWidth
+                height: parent.height
+                anchors.horizontalCenter: parent.horizontalCenter
+                model: displayModel
+                clip: true
+                cellWidth: root.gridCellWidth
+                cellHeight: root.gridCellHeight
+                boundsBehavior: Flickable.StopAtBounds
+                currentIndex: root.selectedIndex
+                highlightMoveDuration: 0
+
+                delegate: Item {
+                  id: gridCell
+                  required property int index
+                  required property int rowIndex
+                  required property string rowTitle
+                  required property string rowImage
+
+                  readonly property bool hasCursor: root.cursorActive && gridCell.index === root.selectedIndex
+                  readonly property bool armed: root.armedKey.length > 0
+                    && root.rows[gridCell.rowIndex]
+                    && root.armedKey === "uninstall:" + root.rows[gridCell.rowIndex].key
+
+                  width: root.gridCellWidth
+                  height: root.gridCellHeight
+
+                  Rectangle {
+                    id: cellSurface
+                    anchors.fill: parent
+                    anchors.margins: Style.space(4)
+                    radius: root.rowRadius
+                    color: gridCell.armed
+                      ? Util.alpha(Color.urgent, 0.24)
+                      : (gridCell.hasCursor ? root.selectedBackground : "transparent")
+                    border.width: gridCell.hasCursor || gridCell.armed ? root.hairline : 0
+                    border.color: gridCell.armed
+                      ? Color.urgent
+                      : Util.alpha(root.accent, 0.45)
+                  }
+
+                  Image {
+                    id: cellIcon
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: Style.space(14)
+                    width: root.gridIconSize
+                    height: root.gridIconSize
+                    sourceSize: Qt.size(root.gridIconSize * 2, root.gridIconSize * 2)
+                    source: gridCell.rowImage
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    smooth: true
+                    mipmap: true
+                  }
+
+                  Text {
+                    id: cellLabel
+                    anchors.top: cellIcon.bottom
+                    anchors.topMargin: Style.space(8)
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    width: parent.width - Style.space(16)
+                    textFormat: Text.PlainText
+                    text: gridCell.armed ? strings.t("confirm.pressToUninstall", "Press ↵ to uninstall") : gridCell.rowTitle
+                    color: gridCell.armed
+                      ? Color.urgent
+                      : (gridCell.hasCursor ? root.selectedText : root.foreground)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.weight: gridCell.hasCursor || gridCell.armed ? Font.Medium : Font.Normal
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignTop
+                    wrapMode: Text.Wrap
+                    maximumLineCount: 2
+                    elide: Text.ElideRight
+                  }
+
+                  MouseArea {
+                    id: cellMouse
+                    anchors.fill: cellSurface
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    onEntered: root.selectFromPointer(gridCell.index, gridCell, {
+                      x: cellMouse.mouseX,
+                      y: cellMouse.mouseY
+                    })
+                    onPositionChanged: function(mouse) {
+                      root.selectFromPointer(gridCell.index, gridCell, mouse)
+                    }
+                    onClicked: function(mouse) {
+                      root.cursorActive = true
+                      root.selectedIndex = gridCell.index
+                      root.pinnedKey = root.selectedRowKey()
+                      var rowObj = root.rows[gridCell.rowIndex]
+                      if (mouse.button === Qt.RightButton) {
+                        if (rowObj && rowObj.payload && rowObj.payload.appId) {
+                          var pt = cellMouse.mapToItem(appGridContainer, mouse.x, mouse.y)
+                          root.appMenuTarget = {
+                            index: gridCell.index,
+                            key: rowObj.key,
+                            appId: String(rowObj.payload.appId),
+                            name: String(rowObj.payload.name || gridCell.rowTitle),
+                            x: pt.x,
+                            y: pt.y
+                          }
+                        }
+                        return
+                      }
+                      root.appMenuTarget = null
+                      root.activate(gridCell.index, (mouse.modifiers & Qt.ShiftModifier) ? true : false)
+                    }
+                  }
+                }
+              }
+
+              Text {
+                anchors.centerIn: parent
+                visible: displayModel.count === 0
+                textFormat: Text.PlainText
+                text: root.query.trim().length > 0
+                  ? strings.t("apps.noMatch", "No applications match “%1”").arg(root.query.trim())
+                  : strings.t("apps.empty", "No applications found")
+                color: root.foreground
+                opacity: 0.55
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+              }
+
+              // Right-click context menu on an app tile (Open, Keep/Remove in Dock, Uninstall)
+              Rectangle {
+                id: appContextMenu
+                visible: root.appMenuTarget !== null
+                z: 20
+                width: Style.space(184)
+                height: appMenuCol.height + Style.space(12)
+                x: root.appMenuTarget
+                  ? Math.max(Style.space(8), Math.min(root.appMenuTarget.x, appGridContainer.width - width - Style.space(8)))
+                  : 0
+                y: root.appMenuTarget
+                  ? Math.max(Style.space(8), Math.min(root.appMenuTarget.y, appGridContainer.height - height - Style.space(8)))
+                  : 0
+                radius: root.rowRadius
+                color: root.glassBackground
+                border.width: root.hairline
+                border.color: root.glassBorder
+
+                Column {
+                  id: appMenuCol
+                  width: parent.width - Style.space(12)
+                  anchors.centerIn: parent
+                  spacing: Style.space(2)
+
+                  Rectangle {
+                    width: parent.width
+                    height: Style.space(32)
+                    radius: Style.space(6)
+                    color: openItemMouse.containsMouse ? root.selectedBackground : "transparent"
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(10)
+                      textFormat: Text.PlainText
+                      text: strings.t("apps.open", "Open")
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+                    MouseArea {
+                      id: openItemMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var t = root.appMenuTarget
+                        root.appMenuTarget = null
+                        if (t) root.activate(t.index, false)
+                      }
+                    }
+                  }
+
+                  Rectangle {
+                    width: parent.width
+                    height: Style.space(32)
+                    radius: Style.space(6)
+                    color: pinItemMouse.containsMouse ? root.selectedBackground : "transparent"
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(10)
+                      textFormat: Text.PlainText
+                      text: (root.appMenuTarget && root.isAppPinned(root.appMenuTarget.appId))
+                        ? strings.t("apps.removeFromDock", "Remove from Dock")
+                        : strings.t("apps.keepInDock", "Keep in Dock")
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+                    MouseArea {
+                      id: pinItemMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        if (root.appMenuTarget) root.toggleAppDockPin(root.appMenuTarget.appId)
+                      }
+                    }
+                  }
+
+                  Rectangle {
+                    width: parent.width
+                    height: Style.space(32)
+                    radius: Style.space(6)
+                    color: uninstallItemMouse.containsMouse ? Util.alpha(Color.urgent, 0.22) : "transparent"
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(10)
+                      textFormat: Text.PlainText
+                      text: strings.t("apps.uninstall", "Uninstall")
+                      color: uninstallItemMouse.containsMouse ? Color.urgent : root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                    }
+                    MouseArea {
+                      id: uninstallItemMouse
+                      anchors.fill: parent
+                      hoverEnabled: true
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: {
+                        var t = root.appMenuTarget
+                        root.appMenuTarget = null
+                        if (t) root.uninstallApp(t.appId, t.name)
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
 
@@ -3395,11 +4098,15 @@ Item {
         }
 
         Text {
-          text: (root.manifest && root.manifest.version) ? String(root.manifest.version) : ""
+          text: root.appsExpanded
+            ? (root.armedKey.indexOf("uninstall:") === 0
+              ? strings.t("footer.appsConfirmHint", "↵ / Del Confirm uninstall · Esc Cancel")
+              : strings.t("footer.appsHint", "↵ Open · Del Uninstall · Right-click Dock"))
+            : ((root.manifest && root.manifest.version) ? String(root.manifest.version) : "")
           visible: text.length > 0
           textFormat: Text.PlainText
-          color: root.foreground
-          opacity: 0.35
+          color: (root.appsExpanded && root.armedKey.indexOf("uninstall:") === 0) ? Color.urgent : root.foreground
+          opacity: (root.appsExpanded && root.armedKey.indexOf("uninstall:") === 0) ? 0.9 : 0.35
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           anchors.right: parent.right

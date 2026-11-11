@@ -106,3 +106,9 @@ test("scope routes open their subtree, and do not leak into the next summon", ()
   assert.equal(idleView(nextOpenState('{"menu":"root"}')), "categories")
   assert.equal(idleView(nextOpenState('{"menu":"system"}')), "system")
 })
+
+test("rebuild() keeps appsExpanded in dedicated app grid mode even when typing", () => {
+  const body = fnBody("rebuild")
+  assert.ok(body.indexOf("if (root.appsExpanded)") < body.indexOf("if (!q)"),
+    "appsExpanded must be handled before the !q branch so typing filters the app grid")
+})

@@ -226,12 +226,16 @@ class HelperTests(unittest.TestCase):
     def test_menu_guards_answer_true_false_and_drop_garbage(self):
         proc = subprocess.run(
             [str(HELPER_PATH), "menu-guards"],
-            input=b'{"a.b": "true", "c.d": "false", "evil!id": "true", "e.f": ""}',
+            input=b'{"a.b": "true", "c.d": "false", "evil!id": "true", "e.f": "", "g.h": {"when": "true", "checked": "true", "disabled": "false"}}',
             capture_output=True, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        guards = json.loads(proc.stdout.decode())["guards"]
+        payload = json.loads(proc.stdout.decode())
+        guards = payload["guards"]
         self.assertTrue(guards["a.b"])
         self.assertFalse(guards["c.d"])
+        self.assertTrue(guards["g.h"])
+        self.assertTrue(payload["checked"]["g.h"])
+        self.assertFalse(payload["disabled"]["g.h"])
         self.assertNotIn("evil!id", guards)
         self.assertNotIn("e.f", guards)
 
@@ -494,6 +498,70 @@ class HelperTests(unittest.TestCase):
             [str(HELPER_PATH), "file-preview", "relative/path"],
             capture_output=True, timeout=30)
         self.assertFalse(json.loads(proc.stdout.decode())["ok"])
+
+    def test_dmenu_onchange_runs_command_and_returns_applied(self):
+        proc = subprocess.run(
+            [str(HELPER_PATH), "dmenu-onchange"],
+            input=json.dumps({
+                "command": [sys.executable, "-c", "import sys; print(sys.argv[1])"],
+                "selected": ["US", "Vietnamese"],
+            }).encode("utf-8"),
+            capture_output=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        reply = json.loads(proc.stdout.decode())
+        self.assertTrue(reply["ok"])
+        self.assertEqual(reply["applied"], ["US", "Vietnamese"])
+
+    def test_dock_pinned_reads_user_shell_json(self):
+        with tempfile.TemporaryDirectory() as home:
+            cfg = Path(home) / ".config" / "omarchy"
+            cfg.mkdir(parents=True)
+            (cfg / "shell.json").write_text(json.dumps({
+                "version": 1,
+                "dock": {"pinned": ["org.gnome.Nautilus.desktop", "chromium", "bad id!"]},
+            }))
+            env = dict(os.environ, HOME=home)
+            proc = subprocess.run(
+                [str(HELPER_PATH), "dock-pinned"],
+                capture_output=True, env=env, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            reply = json.loads(proc.stdout.decode())
+            self.assertTrue(reply["ok"])
+            self.assertEqual(reply["pinned"], ["org.gnome.Nautilus", "chromium"])
+
+    def test_read_icons_prefers_highest_resolution_over_16x16(self):
+        with tempfile.TemporaryDirectory() as home:
+            low = Path(home) / ".local" / "share" / "icons" / "hicolor" / "16x16" / "apps"
+            high = Path(home) / ".local" / "share" / "icons" / "hicolor" / "256x256" / "apps"
+            low.mkdir(parents=True)
+            high.mkdir(parents=True)
+            (low / "steam.png").write_bytes(b"low")
+            (high / "steam.png").write_bytes(b"high")
+            env = dict(os.environ, HOME=home, XDG_DATA_DIRS="/nonexistent")
+            proc = subprocess.run(
+                [str(HELPER_PATH), "read-icons"],
+                capture_output=True, env=env, timeout=30)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            reply = json.loads(proc.stdout.decode())
+            self.assertTrue(reply["ok"])
+            self.assertEqual(reply["icons"]["steam"], str(high / "steam.png"))
+
+    def test_apply_menu_translations_preserves_english_in_aliases(self):
+        items = HELPER.normalize_menu({
+            "appearance": {"label": "Appearance", "aliases": ["style"]},
+            "appearance.theme": {"label": "Theme", "action": "run"},
+        })
+        catalog = {
+            "appearance": {"label": "Giao diện"},
+            "appearance.theme": {"label": "Chủ đề"},
+        }
+        translated = HELPER._apply_menu_translations(items, catalog)
+        by_id = {r["id"]: r for r in translated}
+        self.assertEqual(by_id["appearance"]["label"], "Giao diện")
+        self.assertIn("Appearance", by_id["appearance"]["aliases"])
+        self.assertIn("style", by_id["appearance"]["aliases"])
+        self.assertEqual(by_id["appearance.theme"]["label"], "Chủ đề")
+        self.assertIn("Theme", by_id["appearance.theme"]["aliases"])
 
 
 if __name__ == "__main__":

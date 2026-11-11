@@ -119,3 +119,44 @@ test("hostile ids cannot pollute prototypes", () => {
   assert.equal({}.polluted, undefined)
   assert.ok(Menu.childrenOf(merged, "root").length >= 0)
 })
+
+test("checked and disabled append checkmark to label", () => {
+  const a = Menu.normalizeItem("appearance.top-bar.background.opaque", {
+    label: "Opaque Bar",
+    checked: '[[ $(omarchy-bar background) == "opaque" ]]',
+  })
+  const b = Menu.normalizeItem("install.browser.chrome", {
+    label: "Chrome",
+    disabled: "omarchy-pkg-present google-chrome",
+  })
+  assert.equal(Menu.labelFor(a, { [a.id]: true }, {}), "Opaque Bar ✓")
+  assert.equal(Menu.labelFor(a, { [a.id]: false }, {}), "Opaque Bar")
+  assert.equal(Menu.labelFor(b, {}, { [b.id]: true }), "Chrome ✓")
+  assert.equal(Menu.labelFor(b, {}, { [b.id]: false }), "Chrome")
+})
+
+test("isVisible hides static submenus when all children are guarded out, keeps provider submenus", () => {
+  const merged = Menu.mergeSources([
+    Menu.normalizeItem("appearance.font", { label: "Font", provider: "fonts" }),
+    Menu.normalizeItem("remove.ai", { label: "AI" }),
+    Menu.normalizeItem("remove.ai.claude", { label: "Claude", action: "rm", when: "has-claude" }),
+  ], [])
+  assert.equal(Menu.isVisible(merged, {}, merged.items["appearance.font"]), true)
+  assert.equal(Menu.isVisible(merged, { "remove.ai.claude": false }, merged.items["remove.ai"]), false)
+  assert.equal(Menu.isVisible(merged, { "remove.ai.claude": true }, merged.items["remove.ai"]), true)
+})
+
+test("swapProviderRows replaces only that provider menu's rows", () => {
+  const base = Menu.mergeSources([
+    Menu.normalizeItem("appearance.font", { label: "Font", provider: "fonts" }),
+  ], [])
+  const first = Menu.swapProviderRows(base.items, base.order, "appearance.font", [
+    { id: "appearance.font.fira", parent: "appearance.font", action: "omarchy-font-set Fira", label: "Fira", isChecked: true },
+  ])
+  assert.equal(Menu.childrenOf(first, "appearance.font").length, 1)
+  assert.equal(Menu.labelFor(first.items["appearance.font.fira"], {}, {}), "Fira ✓")
+  const second = Menu.swapProviderRows(first.items, first.order, "appearance.font", [
+    { id: "appearance.font.jet", parent: "appearance.font", action: "omarchy-font-set Jet", label: "Jet", isChecked: false },
+  ])
+  assert.deepEqual(Menu.childrenOf(second, "appearance.font").map((r) => r.id), ["appearance.font.jet"])
+})

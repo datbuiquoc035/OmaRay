@@ -23,6 +23,11 @@ test("subtree routes open the scope the stock menu would have", () => {
   assert.deepEqual(Routes.resolve("hw"), { kind: "scope", scope: "trigger.hardware" })
   assert.deepEqual(Routes.resolve("share"), { kind: "scope", scope: "trigger.share" })
   assert.deepEqual(Routes.resolve("HARDWARE"), { kind: "scope", scope: "trigger.hardware" })
+  assert.deepEqual(Routes.resolve("appearance"), { kind: "scope", scope: "appearance" })
+  assert.deepEqual(Routes.resolve("style"), { kind: "scope", scope: "appearance" })
+  assert.deepEqual(Routes.resolve("font"), { kind: "scope", scope: "appearance.font" })
+  assert.deepEqual(Routes.resolve("language"), { kind: "scope", scope: "setup.language" })
+  assert.deepEqual(Routes.resolve("kernel"), { kind: "scope", scope: "update.kernel" })
 })
 
 test("routes are never scope-resolved through Object.prototype", () => {

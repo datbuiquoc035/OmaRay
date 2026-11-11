@@ -8,7 +8,7 @@ const scoreFn = (candidate, query) => Fuzzy.score(candidate, query)
 test("ten stock categories", () => {
   assert.deepEqual(
     Categories.defs().map((d) => d.title),
-    ["Apps", "Learn", "Trigger", "Style", "Setup", "Install", "Remove", "Update", "About", "System"]
+    ["Apps", "Learn", "Appearance", "Trigger", "Setup", "Install", "Remove", "Update", "About", "System"]
   )
 })
 
@@ -17,9 +17,10 @@ test("app query puts Apps first, above partial matches", () => {
   assert.equal(rows[0].key, "cat.apps")
 })
 
-test("sys finds System, theme finds Style", () => {
+test("sys finds System, theme and style find Appearance", () => {
   assert.equal(Categories.match("sys", scoreFn, 5)[0].key, "cat.system")
-  assert.equal(Categories.match("theme", scoreFn, 5)[0].key, "cat.style")
+  assert.equal(Categories.match("theme", scoreFn, 5)[0].key, "cat.appearance")
+  assert.equal(Categories.match("style", scoreFn, 5)[0].key, "cat.appearance")
 })
 
 test("keywords find categories by what they do", () => {
