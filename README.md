@@ -8,7 +8,8 @@ OmaRay replaces the stock Omarchy menu with one overlay that does many jobs:
 launch apps, run Omarchy commands, switch windows, calculate, convert units,
 set reminders and calendar events, search files and clipboard history,
 pick emoji and colors, look up keybindings, browse the stock
-Install/Remove menu tree, and answer `omarchy-menu-select` picker requests —
+Install/Remove menu tree, and answer `omarchy-menu-select` picker requests,
+also including a dedicated app launcher and language switcher - 
 all from one search field.
 
 ## Requirements
@@ -103,6 +104,11 @@ Each provider contributes zero or more rows; empty results are skipped.
 16. **Web suggestions** — live completions when `webSuggestions` is on
     (up to `maxSuggestions` rows).
 17. **Web fallback** — always last: `Search <engine> for "…"` for the full query.
+18. **Dedicated App launcher** - OmaRay-themed App Launcher, opens via Super + Alt + Space. With right-click functions for the dock of the new floating layout mode.
+    ![App launcher preview](previews/app_launcher.png)
+19. **Language Switcher** - switches to 50 supported languages from Omarchy 4.5.0 Update, type your desired language in the scope to switch its system language to your selected language. 
+`vietnam - switch to Vietnamese, english - switch to English, chinese - switch to Chinese, etc...`
+    ![Language switcher preview](previews/language_switcher.png)
 
 ## License
 
