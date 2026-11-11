@@ -1,4 +1,6 @@
 const assert = require("node:assert/strict")
+const fs = require("node:fs")
+const path = require("node:path")
 const test = require("node:test")
 const Apps = require("../lib/Apps.js")
 
@@ -20,4 +22,12 @@ test("hidden ids cannot pollute object prototypes", () => {
   assert.equal(hidden.__proto__, true)
   assert.equal(hidden.constructor, true)
   assert.equal({}.polluted, undefined)
+})
+
+test("upstream Omarchy MIT copyright notice is retained in LICENSE and lib/Apps.js", () => {
+  const license = fs.readFileSync(path.join(__dirname, "..", "LICENSE"), "utf8")
+  const appsSource = fs.readFileSync(path.join(__dirname, "..", "lib", "Apps.js"), "utf8")
+  assert.match(license, /Copyright \(c\).*datbuiquoc035/)
+  assert.match(license, /Copyright \(c\).*David Heinemeier Hansson/)
+  assert.match(appsSource, /Copyright \(c\).*David Heinemeier Hansson/)
 })

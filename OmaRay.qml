@@ -592,6 +592,7 @@ Item {
     suggestProc.running = false
     fileProc.running = false
     clipboardProc.running = false
+    pasteProc.running = false
     previewProc.running = false
     emojiProc.running = false
     hotkeysProc.running = false
@@ -913,6 +914,75 @@ Item {
     copyProc.running = true
     copyProc.write(text)
     copyProc.stdinEnabled = false
+  }
+
+  // Explicit paste routes through the helper's bounded `paste-text`
+  // subcommand (PASTE_BYTES + PASTE_DEADLINE) instead of QClipboard, so a
+  // slow or oversized Wayland clipboard offer cannot stall or exhaust the
+  // shared shell process.
+  function pasteClipboard() {
+    if (!root.opened) return
+    pasteProc.running = false
+    pasteProc.command = root.helperArgv(["paste-text"])
+    pasteProc.running = true
+  }
+
+  function prevCharPos(str, pos) {
+    var s = String(str || "")
+    var p = Math.max(0, Math.min(s.length, Number(pos) || 0))
+    if (p <= 0) return 0
+    if (p >= 2) {
+      var hi = s.charCodeAt(p - 2)
+      var lo = s.charCodeAt(p - 1)
+      if (hi >= 0xd800 && hi <= 0xdbff && lo >= 0xdc00 && lo <= 0xdfff) return p - 2
+    }
+    return p - 1
+  }
+
+  function nextCharPos(str, pos) {
+    var s = String(str || "")
+    var p = Math.max(0, Math.min(s.length, Number(pos) || 0))
+    if (p >= s.length) return s.length
+    if (p + 1 < s.length) {
+      var hi = s.charCodeAt(p)
+      var lo = s.charCodeAt(p + 1)
+      if (hi >= 0xd800 && hi <= 0xdbff && lo >= 0xdc00 && lo <= 0xdfff) return p + 2
+    }
+    return p + 1
+  }
+
+  function prevWordPos(str, pos) {
+    var s = String(str || "")
+    var p = Math.max(0, Math.min(s.length, Number(pos) || 0))
+    return s.slice(0, p).replace(/\s+$/, "").replace(/\S+$/, "").length
+  }
+
+  function nextWordPos(str, pos) {
+    var s = String(str || "")
+    var p = Math.max(0, Math.min(s.length, Number(pos) || 0))
+    var m = s.slice(p).match(/^\s*\S+/)
+    return m ? p + m[0].length : s.length
+  }
+
+  function insertQueryText(fragment) {
+    var clean = String(fragment || "").replace(/[\x00-\x1f\x7f]+/g, " ")
+    if (!clean) return
+    var cur = String(input.text || "")
+    var pos = Math.max(0, Math.min(cur.length, Number(input.cursorPosition) || 0))
+    var room = root.maxQueryChars - cur.length
+    if (room <= 0) return
+    var slice = clean.slice(0, room)
+    var next = cur.slice(0, pos) + slice + cur.slice(pos)
+    var nextPos = pos + slice.length
+    input.text = next
+    input.cursorPosition = nextPos
+  }
+
+  function loadPaste(raw) {
+    if (!root.opened) return
+    var reply = root.helperReply(raw)
+    if (!reply || typeof reply.text !== "string" || !reply.text) return
+    root.insertQueryText(reply.text)
   }
 
   // Enter toggles a boolean or steps an enum/number forward, Shift+Enter
@@ -2667,6 +2737,14 @@ Item {
   Process { id: copyProc }
 
   Process {
+    id: pasteProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.loadPaste(text)
+    }
+  }
+
+  Process {
     id: remindersProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -2832,6 +2910,7 @@ Item {
     root.stopQueryWork()
     clipCopyProc.running = false
     copyProc.running = false
+    pasteProc.running = false
     previewProc.running = false
     remindersProc.running = false
     settingsProc.running = false
@@ -2983,30 +3062,51 @@ Item {
           anchors.verticalCenter: parent.verticalCenter
         }
 
-        TextInput {
+        // A plain Item rather than a native TextInput: in Qt 6.12.0,
+        // QQuickTextInput connects QClipboard::dataChanged in its constructor
+        // to q_canPasteChanged(), which synchronously reads mimeData->text()
+        // without a byte cap and resets its 1s wait on every chunk. Keeping
+        // the search field off QQuickTextInput means clipboard changes never
+        // touch the selection, and explicit paste routes through the helper's
+        // bounded `paste-text` subcommand.
+        Item {
           id: input
           anchors.left: searchGlyph.right
           anchors.leftMargin: Style.space(10)
           anchors.right: parent.right
           anchors.rightMargin: root.gutter
           anchors.verticalCenter: parent.verticalCenter
+          height: root.searchHeight
 
-          color: root.foreground
-          selectionColor: Util.alpha(root.accent, 0.35)
-          selectedTextColor: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: root.searchFontSize
+          property string text: ""
+          property int cursorPosition: 0
           // A query is a line someone typed, and every provider fans out from
           // it — the web fallback interpolates it into a row title, the file
           // search hands it to fd. Bounding it here bounds all of them.
-          maximumLength: root.maxQueryChars
+          readonly property int maximumLength: root.maxQueryChars
+          readonly property real caretX: prefixMetrics.advanceWidth
+          readonly property real scrollX: width > 0 ? Math.max(0, caretX - width + Style.space(4)) : 0
+
           clip: true
           focus: true
           activeFocusOnTab: false
-          selectByMouse: true
-          inputMethodHints: Qt.ImhNoPredictiveText | Qt.ImhNoAutoUppercase
 
-          onTextChanged: root.query = text
+          onTextChanged: {
+            if (text.length > maximumLength) {
+              text = text.slice(0, maximumLength)
+              return
+            }
+            if (cursorPosition > text.length) cursorPosition = text.length
+            else if (cursorPosition < 0) cursorPosition = 0
+            root.query = text
+          }
+
+          TextMetrics {
+            id: prefixMetrics
+            font.family: root.fontFamily
+            font.pixelSize: root.searchFontSize
+            text: input.text.slice(0, Math.max(0, Math.min(input.text.length, input.cursorPosition)))
+          }
 
           Text {
             anchors.fill: parent
@@ -3017,15 +3117,33 @@ Item {
             textFormat: Text.PlainText
             color: root.foreground
             opacity: 0.38
-            font.family: input.font.family
-            font.pixelSize: input.font.pixelSize
+            font.family: root.fontFamily
+            font.pixelSize: root.searchFontSize
             verticalAlignment: Text.AlignVCenter
             elide: Text.ElideRight
           }
 
-          // BeforeItem so navigation and activation win over text editing;
-          // anything not handled here falls through to normal typing, which
-          // keeps Ctrl+V, selection and caret movement intact.
+          Text {
+            x: -input.scrollX
+            height: parent.height
+            visible: input.text.length > 0
+            text: input.text
+            textFormat: Text.PlainText
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: root.searchFontSize
+            verticalAlignment: Text.AlignVCenter
+          }
+
+          Rectangle {
+            x: Math.max(0, input.caretX - input.scrollX)
+            anchors.verticalCenter: parent.verticalCenter
+            width: Math.max(1, Style.space(2))
+            height: Math.round(root.searchFontSize * 1.15)
+            color: root.accent
+            visible: input.activeFocus && root.opened
+          }
+
           Keys.priority: Keys.BeforeItem
           Keys.onPressed: function(event) {
             typingGuard.restart()
@@ -3051,6 +3169,7 @@ Item {
               } else if (input.text.length > 0
                   && (root.primedQuery === "" || input.text !== root.primedQuery)) {
                 input.text = ""
+                input.cursorPosition = 0
               } else if (root.appsExpanded && !root.appsRouteDirect) {
                 root.appsExpanded = false
                 root.rebuild()
@@ -3086,7 +3205,10 @@ Item {
               // Tab completes the query with the selected row's title, the way
               // a shell completes a path — handy for narrowing an app search.
               var sel = root.selectedRow()
-              if (sel && sel.kind === "app") input.text = sel.title
+              if (sel && sel.kind === "app") {
+                input.text = sel.title
+                input.cursorPosition = input.text.length
+              }
               event.accepted = true
             } else if (event.key === Qt.Key_Left
                 && event.modifiers === Qt.NoModifier && !root.dmenuActive) {
@@ -3111,6 +3233,7 @@ Item {
                   && input.cursorPosition === input.text.length) {
                 root.primedQuery = ""
                 input.text = ""
+                input.cursorPosition = 0
                 event.accepted = true
               }
             } else if (event.key === Qt.Key_Right
@@ -3127,6 +3250,63 @@ Item {
                   event.accepted = true
                 }
               }
+            }
+
+            if (event.accepted) return
+
+            var cur = String(input.text || "")
+            var pos = Math.max(0, Math.min(cur.length, Number(input.cursorPosition) || 0))
+            var ctrl = (event.modifiers & Qt.ControlModifier) !== 0
+            var shift = (event.modifiers & Qt.ShiftModifier) !== 0
+            var altOrMeta = (event.modifiers & (Qt.AltModifier | Qt.MetaModifier)) !== 0
+
+            if ((event.key === Qt.Key_V && ctrl && !altOrMeta)
+                || (event.key === Qt.Key_Insert && shift && !altOrMeta)
+                || event.key === Qt.Key_Paste) {
+              root.pasteClipboard()
+              event.accepted = true
+            } else if (event.key === Qt.Key_U && event.modifiers === Qt.ControlModifier) {
+              input.text = ""
+              input.cursorPosition = 0
+              event.accepted = true
+            } else if (event.key === Qt.Key_K && event.modifiers === Qt.ControlModifier) {
+              input.text = cur.slice(0, pos)
+              input.cursorPosition = pos
+              event.accepted = true
+            } else if (event.key === Qt.Key_Backspace
+                || (event.key === Qt.Key_W && event.modifiers === Qt.ControlModifier)) {
+              if (!altOrMeta && pos > 0) {
+                var backTo = (ctrl || event.key === Qt.Key_W)
+                  ? root.prevWordPos(cur, pos)
+                  : root.prevCharPos(cur, pos)
+                input.text = cur.slice(0, backTo) + cur.slice(pos)
+                input.cursorPosition = backTo
+              }
+              event.accepted = true
+            } else if (event.key === Qt.Key_Delete) {
+              if (!altOrMeta && pos < cur.length) {
+                var fwdTo = ctrl ? root.nextWordPos(cur, pos) : root.nextCharPos(cur, pos)
+                input.text = cur.slice(0, pos) + cur.slice(fwdTo)
+                input.cursorPosition = pos
+              }
+              event.accepted = true
+            } else if (event.key === Qt.Key_Left && !altOrMeta) {
+              input.cursorPosition = ctrl ? root.prevWordPos(cur, pos) : root.prevCharPos(cur, pos)
+              event.accepted = true
+            } else if (event.key === Qt.Key_Right && !altOrMeta) {
+              input.cursorPosition = ctrl ? root.nextWordPos(cur, pos) : root.nextCharPos(cur, pos)
+              event.accepted = true
+            } else if (event.key === Qt.Key_Home
+                || (event.key === Qt.Key_A && event.modifiers === Qt.ControlModifier)) {
+              input.cursorPosition = 0
+              event.accepted = true
+            } else if (event.key === Qt.Key_End
+                || (event.key === Qt.Key_E && event.modifiers === Qt.ControlModifier)) {
+              input.cursorPosition = cur.length
+              event.accepted = true
+            } else if (!ctrl && !altOrMeta && event.text && event.text.length > 0) {
+              root.insertQueryText(event.text)
+              event.accepted = true
             }
           }
         }

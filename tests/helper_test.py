@@ -563,6 +563,233 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(by_id["appearance.theme"]["label"], "Chủ đề")
         self.assertIn("Theme", by_id["appearance.theme"]["aliases"])
 
+    def _clipboard_provider(self, directory, mode="normal", text="hello\nworld"):
+        """Spawn a separate clipboard provider process advertising text over a socket.
+
+        The provider runs as an independent process listening on `provider.sock`
+        and advertising the current clipboard offer in `offer.json`. `wl-paste`
+        connects to `provider.sock` only when a consumer actually requests the
+        clipboard payload, and the provider records every payload request in
+        `requests.json`.
+        """
+        base = Path(directory)
+        bin_dir = base / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        sock_path = base / "provider.sock"
+        offer_file = base / "advertised_offer.json"
+        requests_file = base / "payload_requests.json"
+        offer_file.write_text(json.dumps({
+            "mode": mode,
+            "text": text,
+            "generation": 1,
+        }))
+        requests_file.write_text(json.dumps([]))
+
+        server_code = (
+            "import json, os, socket, sys, time\n"
+            "sock_path, offer_path, req_path = sys.argv[1], sys.argv[2], sys.argv[3]\n"
+            "srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            "srv.bind(sock_path)\n"
+            "srv.listen(8)\n"
+            "srv.settimeout(0.2)\n"
+            "while os.path.exists(sock_path):\n"
+            "    try:\n"
+            "        conn, _ = srv.accept()\n"
+            "    except socket.timeout:\n"
+            "        continue\n"
+            "    except OSError:\n"
+            "        break\n"
+            "    try:\n"
+            "        meta = json.loads(conn.recv(1024).decode('utf-8', 'replace') or '{}')\n"
+            "        offer = json.loads(open(offer_path).read())\n"
+            "        reqs = json.loads(open(req_path).read())\n"
+            "        entry = {\n"
+            "            'argv': meta.get('argv', []),\n"
+            "            'client_pid': meta.get('pid'),\n"
+            "            'child_pid': meta.get('child_pid'),\n"
+            "            'generation': offer.get('generation', 1),\n"
+            "            'bytes_sent': 0,\n"
+            "        }\n"
+            "        reqs.append(entry)\n"
+            "        open(req_path, 'w').write(json.dumps(reqs))\n"
+            "        mode = offer.get('mode', 'normal')\n"
+            "        if mode == 'normal':\n"
+            "            data = offer.get('text', '').encode('utf-8')\n"
+            "            conn.sendall(data)\n"
+            "            entry['bytes_sent'] = len(data)\n"
+            "            open(req_path, 'w').write(json.dumps(reqs))\n"
+            "        elif mode == 'oversized':\n"
+            "            chunk = b'A' * 1024\n"
+            "            for _ in range(1024):\n"
+            "                conn.sendall(chunk)\n"
+            "                entry['bytes_sent'] += len(chunk)\n"
+            "                open(req_path, 'w').write(json.dumps(reqs))\n"
+            "        elif mode == 'trickle':\n"
+            "            for i in range(100):\n"
+            "                piece = ('chunk-%d ' % i).encode('utf-8')\n"
+            "                conn.sendall(piece)\n"
+            "                entry['bytes_sent'] += len(piece)\n"
+            "                open(req_path, 'w').write(json.dumps(reqs))\n"
+            "                time.sleep(0.15)\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    finally:\n"
+            "        try:\n"
+            "            conn.close()\n"
+            "        except OSError:\n"
+            "            pass\n"
+        )
+        provider_proc = subprocess.Popen(
+            [sys.executable, "-c", server_code, str(sock_path), str(offer_file), str(requests_file)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: (provider_proc.terminate(), provider_proc.wait(timeout=5)))
+        for _ in range(50):
+            if sock_path.exists():
+                break
+            time.sleep(0.02)
+
+        stub = bin_dir / "wl-paste"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, socket, subprocess, sys\n"
+            "child = subprocess.Popen(['sleep', '60'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+            "sock.connect(os.environ['CLIP_PROVIDER_SOCK'])\n"
+            "sock.sendall(json.dumps({'argv': sys.argv[1:], 'pid': os.getpid(), 'child_pid': child.pid}).encode('utf-8'))\n"
+            "try:\n"
+            "    while True:\n"
+            "        data = sock.recv(4096)\n"
+            "        if not data:\n"
+            "            break\n"
+            "        sys.stdout.buffer.write(data)\n"
+            "        sys.stdout.buffer.flush()\n"
+            "except BrokenPipeError:\n"
+            "    pass\n"
+            "finally:\n"
+            "    child.terminate()\n"
+            "    sock.close()\n"
+        )
+        stub.chmod(0o755)
+        env = dict(
+            os.environ,
+            HOME=directory,
+            PATH="%s:%s" % (bin_dir, os.environ["PATH"]),
+            CLIP_PROVIDER_SOCK=str(sock_path),
+            CLIP_OFFER_FILE=str(offer_file),
+            CLIP_REQUESTS_FILE=str(requests_file),
+        )
+        return env, offer_file, requests_file
+
+    def test_clipboard_change_alone_does_not_request_foreign_payload(self):
+        with tempfile.TemporaryDirectory() as home:
+            (Path(home) / ".config" / "omarchy").mkdir(parents=True)
+            state = Path(home) / ".local" / "state" / "omarchy"
+            state.mkdir(parents=True)
+            (state / "clipboard-history.json").write_text(
+                json.dumps([{"type": "text", "text": "saved history item"}]))
+            env, offer_file, requests_file = self._clipboard_provider(
+                home, mode="oversized", text="x" * 100000)
+
+            # Advertise multiple clipboard changes from the foreign provider
+            # while the shell/helper performs open and clipboard-history reads.
+            for gen in (1, 2, 3):
+                offer_file.write_text(json.dumps({
+                    "mode": "oversized",
+                    "text": "foreign-offer-%d" % gen,
+                    "generation": gen,
+                }))
+                for cmd in ("read-settings", "read-usage", "read-clipboard"):
+                    proc = subprocess.run(
+                        [str(HELPER_PATH), cmd],
+                        capture_output=True, env=env, timeout=10)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+                    self.assertTrue(json.loads(proc.stdout.decode())["ok"])
+
+            # Neither advertising text nor reading clipboard history may ever
+            # pull the live offer's payload from the provider.
+            requests = json.loads(requests_file.read_text())
+            self.assertEqual(requests, [])
+
+            # Static guarantee on the QML side: OmaRay must not instantiate
+            # Qt's native TextInput/TextEdit/TextField, whose QQuickTextInput
+            # constructor wires QClipboard::dataChanged -> q_canPasteChanged()
+            # -> mimeData->text() automatically on Qt 6.12.0.
+            qml_source = (ROOT / "OmaRay.qml").read_text(encoding="utf-8")
+            self.assertIsNone(
+                HELPER.re.search(r"\b(?:TextInput|TextEdit|TextField)\s*\{", qml_source))
+
+    def test_paste_text_reads_and_normalizes_from_clipboard_provider(self):
+        with tempfile.TemporaryDirectory() as home:
+            env, _, requests_file = self._clipboard_provider(
+                home, mode="normal", text="hello\nworld\tfrom\x07clipboard")
+            proc = subprocess.run(
+                [str(HELPER_PATH), "paste-text"],
+                capture_output=True, env=env, timeout=10)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            reply = json.loads(proc.stdout.decode())
+            self.assertTrue(reply["ok"], reply)
+            self.assertEqual(reply["text"], "hello world from clipboard")
+            self.assertFalse(reply["truncated"])
+
+            requests = json.loads(requests_file.read_text())
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(requests[0]["argv"], ["--type", "text", "--no-newline"])
+
+    def test_paste_text_stops_at_byte_limit_and_reaps_provider(self):
+        with tempfile.TemporaryDirectory() as home:
+            env, _, requests_file = self._clipboard_provider(home, mode="oversized")
+            started = time.monotonic()
+            proc = subprocess.run(
+                [str(HELPER_PATH), "paste-text"],
+                capture_output=True, env=env, timeout=10)
+            elapsed = time.monotonic() - started
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            reply = json.loads(proc.stdout.decode())
+            self.assertTrue(reply["ok"], reply)
+            self.assertTrue(reply["truncated"])
+            self.assertEqual(len(reply["text"]), HELPER.PASTE_CHARS)
+            self.assertEqual(reply["text"], "A" * HELPER.PASTE_CHARS)
+            # Stops immediately on reaching PASTE_BYTES without waiting for the
+            # provider's 60s sleep.
+            self.assertLess(elapsed, 3.0)
+
+            requests = json.loads(requests_file.read_text())
+            self.assertEqual(len(requests), 1)
+            child_pid = requests[0]["child_pid"]
+            for _ in range(50):
+                if not Path("/proc", str(child_pid)).exists():
+                    break
+                time.sleep(0.02)
+            self.assertFalse(Path("/proc", str(child_pid)).exists())
+
+    def test_paste_text_stops_at_total_deadline_when_provider_trickles_chunks(self):
+        with tempfile.TemporaryDirectory() as home:
+            env, _, requests_file = self._clipboard_provider(home, mode="trickle")
+            started = time.monotonic()
+            proc = subprocess.run(
+                [str(HELPER_PATH), "paste-text"],
+                capture_output=True, env=env, timeout=10)
+            elapsed = time.monotonic() - started
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            reply = json.loads(proc.stdout.decode())
+            self.assertTrue(reply["ok"], reply)
+            self.assertTrue(reply["truncated"])
+            self.assertTrue(reply["text"].startswith("chunk-0 "))
+            # Total wall-clock deadline cuts off a chunk trickle that would
+            # keep a per-iteration 1s wait alive for 15 seconds.
+            self.assertLess(elapsed, HELPER.PASTE_DEADLINE + 2.5)
+
+            requests = json.loads(requests_file.read_text())
+            self.assertEqual(len(requests), 1)
+            child_pid = requests[0]["child_pid"]
+            for _ in range(50):
+                if not Path("/proc", str(child_pid)).exists():
+                    break
+                time.sleep(0.02)
+            self.assertFalse(Path("/proc", str(child_pid)).exists())
+
 
 if __name__ == "__main__":
     unittest.main()

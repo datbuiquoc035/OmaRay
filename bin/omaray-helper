@@ -62,6 +62,14 @@ CLIP_TITLE_BYTES = 1024
 # emoji output. Bounded far above any real row and passed to wl-copy on stdin.
 COPY_TEXT_BYTES = 64 * 1024
 
+# Explicit paste into the search line: bounded in aggregate bytes and total
+# wall-clock time before the shell ever sees a character. 512 UTF-8 characters
+# is at most 2048 bytes; 4096 leaves room for whitespace collapsing before
+# clamping to the 512-character query limit.
+PASTE_BYTES = 4096
+PASTE_DEADLINE = 1.5
+PASTE_CHARS = 512
+
 SUGGEST_BYTES = 64 * 1024
 SUGGEST_DEADLINE = 3.0
 SUGGEST_COUNT = 8
@@ -351,18 +359,21 @@ def run_bounded(argv, cap, deadline, stdin_bytes=None):
             if remaining <= 0:
                 truncated = True
                 break
+            room = cap - total
+            if room <= 0:
+                truncated = True
+                break
             ready, _, _ = select.select([fd], [], [], min(remaining, 0.25))
             if not ready:
                 continue
             try:
-                chunk = os.read(fd, 65536)
+                chunk = os.read(fd, min(65536, room))
             except BlockingIOError:
                 continue
             except OSError:
                 break
             if not chunk:
                 break
-            room = cap - total
             if len(chunk) >= room:
                 chunks.append(chunk[:room])
                 truncated = True
@@ -1418,6 +1429,28 @@ def cmd_copy_text():
     emit({"copied": _wl_copy(payload)})
 
 
+def cmd_paste_text():
+    """Read the current Wayland clipboard selection under a byte and time bound.
+
+    Qt's native QQuickTextInput connects QClipboard::dataChanged to
+    q_canPasteChanged(), which on Qt 6.12.0 reads the entire clipboard offer
+    without an aggregate byte cap and resets its 1s poll timeout on every
+    chunk. The search field is therefore a plain Item rather than a TextInput:
+    clipboard changes never touch the selection, and an explicit paste routes
+    here so run_bounded caps both total bytes (PASTE_BYTES) and total
+    wall-clock time (PASTE_DEADLINE) before the shell sees a single character.
+    """
+    raw, truncated = run_bounded(
+        ["wl-paste", "--type", "text", "--no-newline"],
+        PASTE_BYTES, PASTE_DEADLINE)
+    text = raw.decode("utf-8", "replace")
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    if len(text) > PASTE_CHARS:
+        text = text[:PASTE_CHARS]
+        truncated = True
+    emit({"text": text, "truncated": bool(truncated)})
+
+
 def cmd_reminders():
     raw, _ = run_bounded(["omarchy-reminder", "show", "--json"],
                          REMINDER_BYTES, REMINDER_DEADLINE)
@@ -1746,6 +1779,7 @@ COMMANDS = {
     "read-clipboard": (cmd_read_clipboard, False),
     "clipboard-copy": (cmd_clipboard_copy, True),
     "copy-text": (cmd_copy_text, False),
+    "paste-text": (cmd_paste_text, False),
     "reminders": (cmd_reminders, False),
     "suggest": (cmd_suggest, True),
     "files": (cmd_files, True),

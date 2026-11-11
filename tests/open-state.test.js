@@ -112,3 +112,30 @@ test("rebuild() keeps appsExpanded in dedicated app grid mode even when typing",
   assert.ok(body.indexOf("if (root.appsExpanded)") < body.indexOf("if (!q)"),
     "appsExpanded must be handled before the !q branch so typing filters the app grid")
 })
+
+test("search field avoids native TextInput so clipboard changes never auto-read", () => {
+  const barQml = fs.readFileSync(path.join(__dirname, "..", "BarWidget.qml"), "utf8")
+  assert.ok(!/\b(?:TextInput|TextEdit|TextField)\s*\{/.test(qml),
+    "OmaRay.qml must not instantiate native TextInput/TextEdit/TextField")
+  assert.ok(!/\b(?:TextInput|TextEdit|TextField)\s*\{/.test(barQml),
+    "BarWidget.qml must not instantiate native TextInput/TextEdit/TextField")
+  assert.ok(/Item\s*\{\s*\n\s*id:\s*input\b/.test(qml),
+    "search input must be a plain Item")
+})
+
+test("paste routes exclusively through bounded helper paste-text on explicit key action", () => {
+  const pasteBody = fnBody("pasteClipboard")
+  assert.ok(pasteBody.includes('helperArgv(["paste-text"])'),
+    "pasteClipboard() must invoke helper paste-text")
+  for (const name of ["open", "openDmenu", "close", "rebuild"]) {
+    const body = fnBody(name)
+    assert.ok(!body.includes("pasteClipboard") && !body.includes("paste-text"),
+      name + "() must never trigger a clipboard paste")
+  }
+  const stopBody = fnBody("stopQueryWork")
+  assert.ok(stopBody.includes("pasteProc.running = false"),
+    "stopQueryWork() must terminate an in-flight paste")
+  const insertBody = fnBody("insertQueryText")
+  assert.ok(insertBody.includes("root.maxQueryChars"),
+    "insertQueryText() must clamp pasted text to maxQueryChars")
+})
